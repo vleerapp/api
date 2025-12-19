@@ -5,6 +5,7 @@ use axum::{
 };
 use serde::Deserialize;
 use sqlx::PgPool;
+use time::OffsetDateTime;
 use tracing::{debug, error};
 
 use crate::{
@@ -24,7 +25,7 @@ async fn submit_telemetry(
 
     let result = sqlx::query(
         r#"
-        INSERT INTO telemetry (user_id, app_version, os_name, song_count)
+        INSERT INTO telemetry (user_id, app_version, os, song_count)
         VALUES ($1, $2, $3, $4)
         "#,
     )
@@ -46,14 +47,17 @@ async fn submit_telemetry(
 
 #[derive(Deserialize)]
 pub struct StatsQuery {
-    pub days: Option<i32>,
+    #[serde(with = "time::serde::rfc3339::option")]
+    pub from: Option<OffsetDateTime>,
 }
 
 async fn get_telemetry_stats(
     State(pool): State<PgPool>,
     Query(params): Query<StatsQuery>,
 ) -> Result<Json<Vec<TelemetryStat>>, axum::http::StatusCode> {
-    let days = params.days.unwrap_or(7);
+    let start_date = params
+        .from
+        .unwrap_or_else(|| OffsetDateTime::now_utc() - time::Duration::days(7));
 
     let stats = sqlx::query_as::<_, TelemetryStat>(
         r#"
@@ -63,12 +67,12 @@ async fn get_telemetry_stats(
             CAST(AVG(song_count) AS FLOAT8) AS avg_songs,
             COUNT(DISTINCT user_id) AS user_count
         FROM telemetry 
-        WHERE time > NOW() - ($1 || ' days')::INTERVAL
+        WHERE time >= $1
         GROUP BY time_bucket('1 day', time), os
         ORDER BY 1 ASC
         "#,
     )
-    .bind(days as f64)
+    .bind(start_date)
     .fetch_all(&pool)
     .await
     .map_err(|e| {
