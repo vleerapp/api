@@ -52,7 +52,7 @@ pub struct TelemetrySubmission {
 pub struct TelemetryStat {
     #[serde(with = "time::serde::rfc3339")]
     pub bucket: OffsetDateTime,
-    pub os_name: String,
+    pub os: String,
     pub avg_songs: f64,
     pub user_count: i64,
 }
