@@ -1,78 +1,99 @@
-name: Build and Publish Docker Image
+name: Fast Multi-Arch Build
 
 on:
   push:
-    branches: ["main"]
+    branches: [ "main" ]
 
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
-  build-and-push:
+  build-binaries:
+    name: Build Binary (${{ matrix.target }})
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-
-    services:
-      postgres:
-        image: timescale/timescaledb-ha:pg17
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: vleer_api
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            docker_arch: linux/amd64
+          - target: aarch64-unknown-linux-gnu
+            docker_arch: linux/arm64
+            use_cross: true
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
 
-      - name: Install SQLx CLI
-        run: cargo install sqlx-cli --no-default-features --features postgres
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
 
-      - name: Run Migrations
+      - name: Start DB for SQLx
         run: |
-          export DATABASE_URL=postgres://postgres:postgres@localhost:5432/vleer_api
+          docker run -d -p 5432:5432 -e POSTGRES_PASSWORD=password timescale/timescaledb:latest-pg16
+          sleep 5
+          cargo install sqlx-cli
+          export DATABASE_URL=postgres://postgres:password@localhost:5432/postgres
+          sqlx database create
           sqlx migrate run
-
-      - name: Prepare SQLx Offline Data
-        run: |
-          export DATABASE_URL=postgres://postgres:postgres@localhost:5432/vleer_api
           cargo sqlx prepare
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+      - name: Build
+        uses: actions-rs/cargo@v1
+        with:
+          use-cross: ${{ matrix.use_cross }}
+          command: build
+          args: --release --target ${{ matrix.target }}
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/api_vleer_app
+
+  push-docker:
+    needs: build-binaries
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: binary-*
+          path: binaries
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Log in to the Container registry
+      - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+      - name: Create Dockerfile
+        run: |
+          echo 'FROM debian:bookworm-slim' > Dockerfile.final
+          echo 'WORKDIR /app' >> Dockerfile.final
+          echo 'RUN apt-get update && apt-get install -y libssl3 ca-certificates && rm -rf /var/lib/apt/lists/*' >> Dockerfile.final
+          # Copy the binary based on the target platform
+          echo 'ARG TARGETARCH' >> Dockerfile.final
+          echo 'COPY binaries/binary-x86_64-unknown-linux-gnu/api_vleer_app /app/api_vleer_app_amd64' >> Dockerfile.final
+          echo 'COPY binaries/binary-aarch64-unknown-linux-gnu/api_vleer_app /app/api_vleer_app_arm64' >> Dockerfile.final
+          echo 'RUN if [ "$TARGETARCH" = "amd64" ]; then mv /app/api_vleer_app_amd64 /app/api_vleer_app; else mv /app/api_vleer_app_arm64 /app/api_vleer_app; fi' >> Dockerfile.final
+          echo 'CMD ["./api_vleer_app"]' >> Dockerfile.final
 
-      - name: Build and push
+      - name: Build and Push
         uses: docker/build-push-action@v5
         with:
           context: .
+          file: Dockerfile.final
           push: true
           platforms: linux/amd64,linux/arm64
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
