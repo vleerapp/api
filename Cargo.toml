@@ -22,3 +22,6 @@ tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
 dotenvy = "0.15.7"
 validator = { version = "0.20.0", features = ["derive"] }
 regex = "1.12.2"
+tower = "0.5.2"
+tower_governor = "0.8.0"
+governor = "0.10.4"
