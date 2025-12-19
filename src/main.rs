@@ -1,11 +1,14 @@
 mod api;
 mod db;
 mod models;
+mod rate_limit;
 
 use axum::Router;
-use tokio::net::TcpListener;
+use std::net::SocketAddr;
 use tracing::{error, info};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+
+use crate::rate_limit::rate_limit;
 
 #[tokio::main]
 async fn main() {
@@ -30,9 +33,18 @@ async fn main() {
 
     info!("Database initialized and migrations applied.");
 
-    let app = Router::new().merge(api::app_router()).with_state(pool);
+    let app = Router::new()
+        .merge(api::app_router())
+        .layer(rate_limit(20, 1000))
+        .with_state(pool);
 
-    let listener = TcpListener::bind("0.0.0.0:3000").await.unwrap();
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
     info!("Server listening on http://0.0.0.0:3000");
-    axum::serve(listener, app).await.unwrap();
+
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await
+    .unwrap();
 }

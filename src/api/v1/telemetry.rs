@@ -10,15 +10,21 @@ use tracing::{debug, error};
 use crate::{
     api::validation::ValidatedJson,
     models::telemetry::{DistributionPoint, StatsQuery, TelemetrySubmission, TimeSeriesPoint},
+    rate_limit::rate_limit,
 };
 
 pub fn router() -> Router<PgPool> {
-    Router::new()
+    let ingest_routes = Router::new()
         .route("/", post(submit_telemetry))
+        .layer(rate_limit(1, 2000));
+    let dashboard_routes = Router::new()
         .route("/songs_over_time", get(get_songs_over_time))
         .route("/users_over_time", get(get_users_over_time))
         .route("/distribution/os", get(get_os_distribution))
         .route("/distribution/version", get(get_version_distribution))
+        .layer(rate_limit(20, 1000));
+
+    Router::new().merge(ingest_routes).merge(dashboard_routes)
 }
 
 async fn submit_telemetry(
