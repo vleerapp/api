@@ -48,11 +48,11 @@ pub struct TelemetrySubmission {
     pub song_count: i64,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, sqlx::FromRow)] 
 pub struct TelemetryStat {
     #[serde(with = "time::serde::rfc3339")]
     pub bucket: OffsetDateTime,
-    pub os: String,
+    pub os_name: String,
     pub avg_songs: f64,
     pub user_count: i64,
 }

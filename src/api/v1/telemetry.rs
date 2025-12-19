@@ -7,7 +7,10 @@ use serde::Deserialize;
 use sqlx::PgPool;
 use tracing::{debug, error};
 
-use crate::{api::validation::ValidatedJson, models::telemetry::{TelemetryStat, TelemetrySubmission}};
+use crate::{
+    api::validation::ValidatedJson,
+    models::telemetry::{TelemetryStat, TelemetrySubmission},
+};
 
 pub fn router() -> Router<PgPool> {
     Router::new().route("/", post(submit_telemetry).get(get_telemetry_stats))
@@ -19,16 +22,16 @@ async fn submit_telemetry(
 ) -> axum::http::StatusCode {
     debug!(user_id = %payload.user_id, "v1: Receiving telemetry");
 
-    let result = sqlx::query!(
+    let result = sqlx::query(
         r#"
-        INSERT INTO telemetry (user_id, app_version, os, song_count)
+        INSERT INTO telemetry (user_id, app_version, os_name, song_count)
         VALUES ($1, $2, $3, $4)
         "#,
-        payload.user_id,
-        payload.app_version,
-        payload.os.as_str(),
-        payload.song_count
     )
+    .bind(payload.user_id)
+    .bind(payload.app_version)
+    .bind(payload.os.as_str())
+    .bind(payload.song_count)
     .execute(&pool)
     .await;
 
@@ -52,21 +55,20 @@ async fn get_telemetry_stats(
 ) -> Result<Json<Vec<TelemetryStat>>, axum::http::StatusCode> {
     let days = params.days.unwrap_or(7);
 
-    let stats = sqlx::query_as!(
-        TelemetryStat,
+    let stats = sqlx::query_as::<_, TelemetryStat>(
         r#"
         SELECT 
-            time_bucket('1 day', time) AS "bucket!",
-            os AS "os!",
-            CAST(AVG(song_count) AS FLOAT8) AS "avg_songs!",
-            COUNT(DISTINCT user_id) AS "user_count!"
+            time_bucket('1 day', time) AS bucket,
+            os,
+            CAST(AVG(song_count) AS FLOAT8) AS avg_songs,
+            COUNT(DISTINCT user_id) AS user_count
         FROM telemetry 
         WHERE time > NOW() - ($1 || ' days')::INTERVAL
         GROUP BY time_bucket('1 day', time), os
         ORDER BY 1 ASC
         "#,
-        days as f64
     )
+    .bind(days as f64)
     .fetch_all(&pool)
     .await
     .map_err(|e| {
