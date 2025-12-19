@@ -1,0 +1,47 @@
+services:
+  app:
+    image: ghcr.io/vleerapp/api:latest
+    restart: always
+    ports:
+      - "3000:3000"
+    environment:
+      - DATABASE_URL=postgres://postgres:postgres@postgres:5432/vleer_api
+      - RUST_LOG=info
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - vleer_api-network
+
+  postgres:
+    image: timescale/timescaledb-ha:pg17
+    restart: unless-stopped
+    ports:
+      - "5434:5432"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: vleer_api
+      PGDATA: /var/lib/postgresql/data
+    volumes:
+      - postgres:/var/lib/postgresql/data
+    post_start:
+      - command: chown -R 1000:1000 /var/lib/postgresql/data
+        user: root
+    networks:
+      vleer_api-network:
+        aliases:
+          - postgres
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U postgres -d vleer_api" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+volumes:
+  postgres:
+
+networks:
+  vleer_api-network:
+    driver: bridge
