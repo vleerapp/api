@@ -1,0 +1,78 @@
+use axum::{
+    Json, Router,
+    extract::{Query, State},
+    routing::post,
+};
+use serde::Deserialize;
+use sqlx::PgPool;
+use tracing::{debug, error};
+
+use crate::{api::validation::ValidatedJson, models::telemetry::{TelemetryStat, TelemetrySubmission}};
+
+pub fn router() -> Router<PgPool> {
+    Router::new().route("/", post(submit_telemetry).get(get_telemetry_stats))
+}
+
+async fn submit_telemetry(
+    State(pool): State<PgPool>,
+    ValidatedJson(payload): ValidatedJson<TelemetrySubmission>,
+) -> axum::http::StatusCode {
+    debug!(user_id = %payload.user_id, "v1: Receiving telemetry");
+
+    let result = sqlx::query!(
+        r#"
+        INSERT INTO telemetry (user_id, app_version, os, song_count)
+        VALUES ($1, $2, $3, $4)
+        "#,
+        payload.user_id,
+        payload.app_version,
+        payload.os.as_str(),
+        payload.song_count
+    )
+    .execute(&pool)
+    .await;
+
+    match result {
+        Ok(_) => axum::http::StatusCode::OK,
+        Err(e) => {
+            error!("v1 insert error: {}", e);
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR
+        }
+    }
+}
+
+#[derive(Deserialize)]
+pub struct StatsQuery {
+    pub days: Option<i32>,
+}
+
+async fn get_telemetry_stats(
+    State(pool): State<PgPool>,
+    Query(params): Query<StatsQuery>,
+) -> Result<Json<Vec<TelemetryStat>>, axum::http::StatusCode> {
+    let days = params.days.unwrap_or(7);
+
+    let stats = sqlx::query_as!(
+        TelemetryStat,
+        r#"
+        SELECT 
+            time_bucket('1 day', time) AS "bucket!",
+            os AS "os!",
+            CAST(AVG(song_count) AS FLOAT8) AS "avg_songs!",
+            COUNT(DISTINCT user_id) AS "user_count!"
+        FROM telemetry 
+        WHERE time > NOW() - ($1 || ' days')::INTERVAL
+        GROUP BY time_bucket('1 day', time), os
+        ORDER BY 1 ASC
+        "#,
+        days as f64
+    )
+    .fetch_all(&pool)
+    .await
+    .map_err(|e| {
+        error!("v1 stats error: {}", e);
+        axum::http::StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    Ok(Json(stats))
+}

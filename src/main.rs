@@ -1,9 +1,10 @@
 mod api;
 mod db;
+mod models;
 
 use axum::Router;
 use tokio::net::TcpListener;
-use tracing::{info, error};
+use tracing::{error, info};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[tokio::main]
@@ -12,8 +13,7 @@ async fn main() {
 
     tracing_subscriber::registry()
         .with(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .with(tracing_subscriber::fmt::layer())
         .init();
@@ -27,12 +27,10 @@ async fn main() {
             std::process::exit(1);
         }
     };
-    
+
     info!("Database initialized and migrations applied.");
 
-    let app = Router::new()
-        .nest("/api/v1", api::app_router())
-        .with_state(pool);
+    let app = Router::new().merge(api::app_router()).with_state(pool);
 
     let listener = TcpListener::bind("0.0.0.0:3000").await.unwrap();
     info!("Server listening on http://0.0.0.0:3000");
