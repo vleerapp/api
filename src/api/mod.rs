@@ -1,8 +1,10 @@
 use axum::Router;
 use sqlx::PgPool;
 
-mod telemetry;
+pub mod v1;
+pub mod validation;
 
 pub fn app_router() -> Router<PgPool> {
-    Router::new().nest("/telemetry", telemetry::router())
+    Router::new()
+        .nest("/v1", v1::router())
 }
