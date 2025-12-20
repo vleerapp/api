@@ -5,5 +5,6 @@ CREATE TABLE IF NOT EXISTS telemetry (
   os TEXT NOT NULL,
   song_count BIGINT NOT NULL
 );
+CREATE INDEX telemetry_user_time_idx ON telemetry (user_id, time DESC);
 
 SELECT create_hypertable('telemetry', 'time', if_not_exists => TRUE);

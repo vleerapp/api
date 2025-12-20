@@ -17,6 +17,7 @@ pub fn router() -> Router<PgPool> {
     let ingest_routes = Router::new()
         .route("/", post(submit_telemetry))
         .layer(rate_limit(1, 2000));
+
     let dashboard_routes = Router::new()
         .route("/songs_over_time", get(get_songs_over_time))
         .route("/users_over_time", get(get_users_over_time))
@@ -35,8 +36,8 @@ async fn submit_telemetry(
 
     let result = sqlx::query(
         r#"
-        INSERT INTO telemetry (user_id, app_version, os, song_count)
-        VALUES ($1, $2, $3, $4)
+        INSERT INTO telemetry (user_id, app_version, os, song_count, time)
+        VALUES ($1, $2, $3, $4, NOW())
         "#,
     )
     .bind(payload.user_id)
@@ -63,22 +64,55 @@ async fn get_songs_over_time(
         .from
         .unwrap_or_else(|| OffsetDateTime::now_utc() - time::Duration::days(30));
 
-    let initial_val: f64 = sqlx::query_scalar(
-        "SELECT COALESCE(SUM(song_count), 0)::FLOAT8 FROM telemetry WHERE time < $1",
-    )
-    .bind(start)
-    .fetch_one(&pool)
-    .await
-    .unwrap_or(0.0);
-
-    let raw_points = sqlx::query_as::<_, TimeSeriesPoint>(
+    let points = sqlx::query_as::<_, TimeSeriesPoint>(
         r#"
+        WITH baseline_state AS (
+            SELECT DISTINCT ON (user_id) 
+                user_id, 
+                song_count::BIGINT as last_val
+            FROM telemetry
+            WHERE time < $1
+            ORDER BY user_id, time DESC
+        ),
+        initial_global_sum AS (
+            SELECT COALESCE(SUM(last_val), 0)::FLOAT8 as total_val 
+            FROM baseline_state
+        ),
+        deltas AS (
+            SELECT 
+                t.time,
+                (t.song_count::BIGINT - COALESCE(
+                    LAG(t.song_count::BIGINT) OVER (PARTITION BY t.user_id ORDER BY t.time), 
+                    b.last_val, 
+                    0
+                )) as change
+            FROM telemetry t
+            LEFT JOIN baseline_state b ON t.user_id = b.user_id
+            WHERE t.time >= $1
+        ),
+        valid_changes AS (
+            SELECT 
+                time as bucket,
+                (SUM(change) OVER (ORDER BY time) + (SELECT total_val FROM initial_global_sum))::FLOAT8 as value
+            FROM deltas
+            WHERE change > 0
+        ),
+        final_point AS (
+            SELECT value FROM valid_changes ORDER BY bucket DESC LIMIT 1
+        )
         SELECT 
-            time AS bucket, 
-            CAST(song_count AS FLOAT8) AS value 
-        FROM telemetry 
-        WHERE time >= $1 
-        ORDER BY time ASC
+            $1 as bucket, 
+            (SELECT total_val FROM initial_global_sum) as value 
+        UNION ALL
+        SELECT bucket, value FROM valid_changes
+        UNION ALL
+        SELECT 
+            NOW() as bucket, 
+            COALESCE(
+                (SELECT value FROM final_point), 
+                (SELECT total_val FROM initial_global_sum)
+            ) as value
+        ORDER BY bucket ASC
         "#,
     )
     .bind(start)
@@ -89,28 +123,7 @@ async fn get_songs_over_time(
         axum::http::StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
-    let mut final_points = Vec::new();
-
-    final_points.push(TimeSeriesPoint {
-        bucket: start,
-        value: initial_val,
-    });
-
-    let mut running_total = initial_val;
-    for p in raw_points {
-        running_total += p.value;
-        final_points.push(TimeSeriesPoint {
-            bucket: p.bucket,
-            value: running_total,
-        });
-    }
-
-    final_points.push(TimeSeriesPoint {
-        bucket: OffsetDateTime::now_utc(),
-        value: running_total,
-    });
-
-    Ok(Json(final_points))
+    Ok(Json(points))
 }
 
 async fn get_users_over_time(
@@ -121,17 +134,43 @@ async fn get_users_over_time(
         .from
         .unwrap_or_else(|| OffsetDateTime::now_utc() - time::Duration::days(30));
 
-    let initial_count: f64 =
-        sqlx::query_scalar("SELECT COUNT(*)::FLOAT8 FROM telemetry WHERE time < $1")
-            .bind(start)
-            .fetch_one(&pool)
-            .await
-            .unwrap_or(0.0);
-
-    let raw_points = sqlx::query_as::<_, TimeSeriesPoint>(
+    let points = sqlx::query_as::<_, TimeSeriesPoint>(
         r#"
-        SELECT time AS bucket, 1.0::FLOAT8 AS value 
-        FROM telemetry WHERE time >= $1 ORDER BY time ASC
+        WITH initial_stats AS (
+            SELECT COUNT(DISTINCT user_id)::FLOAT8 as initial_count
+            FROM telemetry
+            WHERE time < $1
+        ),
+        new_user_events AS (
+            SELECT 
+                user_id, 
+                MIN(time) as first_seen
+            FROM telemetry
+            GROUP BY user_id
+            HAVING MIN(time) >= $1
+        ),
+        timeline AS (
+            SELECT 
+                first_seen as bucket,
+                ((SELECT initial_count FROM initial_stats) + RANK() OVER (ORDER BY first_seen))::FLOAT8 as value
+            FROM new_user_events
+        ),
+        final_point AS (
+            SELECT value FROM timeline ORDER BY bucket DESC LIMIT 1
+        )
+        SELECT 
+            $1 as bucket, 
+            (SELECT initial_count FROM initial_stats) as value
+        UNION ALL
+        SELECT bucket, value FROM timeline
+        UNION ALL
+        SELECT 
+            NOW() as bucket, 
+            COALESCE(
+                (SELECT value FROM final_point), 
+                (SELECT initial_count FROM initial_stats)
+            ) as value
+        ORDER BY bucket ASC
         "#,
     )
     .bind(start)
@@ -142,28 +181,7 @@ async fn get_users_over_time(
         axum::http::StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
-    let mut final_points = Vec::new();
-
-    final_points.push(TimeSeriesPoint {
-        bucket: start,
-        value: initial_count,
-    });
-
-    let mut running_total = initial_count;
-    for p in raw_points {
-        running_total += 1.0;
-        final_points.push(TimeSeriesPoint {
-            bucket: p.bucket,
-            value: running_total,
-        });
-    }
-
-    final_points.push(TimeSeriesPoint {
-        bucket: OffsetDateTime::now_utc(),
-        value: running_total,
-    });
-
-    Ok(Json(final_points))
+    Ok(Json(points))
 }
 
 async fn get_os_distribution(
@@ -172,9 +190,12 @@ async fn get_os_distribution(
 ) -> Result<Json<Vec<DistributionPoint>>, axum::http::StatusCode> {
     let stats = sqlx::query_as::<_, DistributionPoint>(
         r#"
-        SELECT os AS label, COUNT(DISTINCT user_id) AS count
-        FROM telemetry
-        -- REMOVED: WHERE time >= $1
+        SELECT os AS label, COUNT(*) AS count
+        FROM (
+            SELECT DISTINCT ON (user_id) os
+            FROM telemetry
+            ORDER BY user_id, time DESC
+        ) latest_states
         GROUP BY os
         ORDER BY count DESC
         "#,
@@ -195,9 +216,12 @@ async fn get_version_distribution(
 ) -> Result<Json<Vec<DistributionPoint>>, axum::http::StatusCode> {
     let stats = sqlx::query_as::<_, DistributionPoint>(
         r#"
-        SELECT app_version AS label, COUNT(DISTINCT user_id) AS count
-        FROM telemetry
-        -- REMOVED: WHERE time >= $1
+        SELECT app_version AS label, COUNT(*) AS count
+        FROM (
+            SELECT DISTINCT ON (user_id) app_version
+            FROM telemetry
+            ORDER BY user_id, time DESC
+        ) latest_states
         GROUP BY app_version
         ORDER BY count DESC
         "#,
