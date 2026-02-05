@@ -3,17 +3,16 @@ mod db;
 mod models;
 mod rate_limit;
 
+use crate::rate_limit::rate_limit;
 use axum::Router;
 use std::net::SocketAddr;
+use tower_http::cors::CorsLayer;
 use tracing::{error, info};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
-
-use crate::rate_limit::rate_limit;
 
 #[tokio::main]
 async fn main() {
     dotenvy::dotenv().ok();
-
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
@@ -35,6 +34,7 @@ async fn main() {
 
     let app = Router::new()
         .merge(api::app_router())
+        .layer(CorsLayer::permissive())
         .layer(rate_limit(20, 1000))
         .with_state(pool);
 
