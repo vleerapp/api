@@ -9,7 +9,7 @@ axum = "0.8.8"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 sqlx = { version = "0.8.6", features = [
-  "runtime-tokio",
+  "runtime-tokio-rustls",
   "postgres",
   "uuid",
   "time",
@@ -26,6 +26,6 @@ tower = "0.5.3"
 tower-http = { version = "0.6.8", features = ["cors"] }
 tower_governor = "0.8.0"
 governor = "0.10.4"
-elasticsearch = "9.1.0-alpha.1"
+elasticsearch = { version = "9.1.0-alpha.1", default-features = false, features = ["rustls-tls"] }
 anyhow = "1.0.101"
 chrono = "0.4.43"
