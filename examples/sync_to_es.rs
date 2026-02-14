@@ -4,18 +4,15 @@ use elasticsearch::{
     http::transport::{SingleNodeConnectionPool, TransportBuilder},
 };
 use serde_json::json;
-use sqlx::PgPool;
+use sqlx::{PgPool, Row};
 use std::env;
 
 #[tokio::main]
 async fn main() -> Result<()> {
     dotenvy::dotenv().ok();
 
-    let es_url =
-        env::var("ELASTICSEARCH_URL").unwrap_or_else(|_| "http://localhost:9200".to_string());
-    let scrape_db_url = env::var("SCRAPE_DATABASE_URL").unwrap_or_else(|_| {
-        "postgres://postgres:postgres@100.70.116.112:5432/apple_music_scrape".to_string()
-    });
+    let es_url = env::var("ELASTICSEARCH_URL")?;
+    let scrape_db_url = env::var("SCRAPE_DATABASE_URL")?;
 
     let pool = PgPool::connect(&scrape_db_url).await?;
 
@@ -62,24 +59,22 @@ async fn main() -> Result<()> {
         .await;
 
     println!("syncing songs");
-    let songs = sqlx::query!(
-        "SELECT apple_music_id, name, artist_name, album_name, duration_seconds, artwork_url FROM songs LIMIT 10000"
+    let songs = sqlx::query(
+        "SELECT apple_music_id, name, duration_seconds, artwork_url FROM songs LIMIT 10000"
     )
     .fetch_all(&pool)
     .await?;
 
     for song in songs {
         let doc = json!({
-            "apple_music_id": song.apple_music_id,
-            "name": song.name,
-            "artist_name": song.artist_name,
-            "album_name": song.album_name,
-            "artwork_url": song.artwork_url,
-            "duration_seconds": song.duration_seconds,
+            "apple_music_id": song.get::<String, _>("apple_music_id"),
+            "name": song.get::<String, _>("name"),
+            "artwork_url": song.get::<String, _>("artwork_url"),
+            "duration_seconds": song.get::<i64, _>("duration_seconds"),
             "item_type": "song"
         });
 
-        let doc_id = format!("song_{}", song.apple_music_id);
+        let doc_id = format!("song_{}", song.get::<String, _>("apple_music_id"));
         let _ = client
             .index(IndexParts::IndexId("music", &doc_id))
             .body(doc)
@@ -88,19 +83,19 @@ async fn main() -> Result<()> {
     }
 
     println!("syncing artists");
-    let artists = sqlx::query!("SELECT apple_music_id, name, artwork_url FROM artists LIMIT 5000")
+    let artists = sqlx::query("SELECT apple_music_id, name, artwork_url FROM artists LIMIT 5000")
         .fetch_all(&pool)
         .await?;
 
     for artist in artists {
         let doc = json!({
-            "apple_music_id": artist.apple_music_id,
-            "name": artist.name,
-            "artwork_url": artist.artwork_url,
+            "apple_music_id": artist.get::<String, _>("apple_music_id"),
+            "name": artist.get::<String, _>("name"),
+            "artwork_url": artist.get::<String, _>("artwork_url"),
             "item_type": "artist"
         });
 
-        let doc_id = format!("artist_{}", artist.apple_music_id);
+        let doc_id = format!("artist_{}", artist.get::<String, _>("apple_music_id"));
         let _ = client
             .index(IndexParts::IndexId("music", &doc_id))
             .body(doc)
@@ -109,23 +104,22 @@ async fn main() -> Result<()> {
     }
 
     println!("syncing albums");
-    let albums = sqlx::query!(
-        "SELECT apple_music_id, name, artist_name, artwork_url, release_date FROM albums LIMIT 5000"
+    let albums = sqlx::query(
+        "SELECT apple_music_id, name, artwork_url, release_date FROM albums LIMIT 5000"
     )
     .fetch_all(&pool)
     .await?;
 
     for album in albums {
         let doc = json!({
-            "apple_music_id": album.apple_music_id,
-            "name": album.name,
-            "artist_name": album.artist_name,
-            "artwork_url": album.artwork_url,
-            "release_date": album.release_date,
+            "apple_music_id": album.get::<String, _>("apple_music_id"),
+            "name": album.get::<String, _>("name"),
+            "artwork_url": album.get::<String, _>("artwork_url"),
+            "release_date": album.get::<String, _>("release_date"),
             "item_type": "album"
         });
 
-        let doc_id = format!("album_{}", album.apple_music_id);
+        let doc_id = format!("album_{}", album.get::<String, _>("apple_music_id"));
         let _ = client
             .index(IndexParts::IndexId("music", &doc_id))
             .body(doc)
