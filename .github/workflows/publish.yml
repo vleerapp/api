@@ -12,6 +12,8 @@ jobs:
   build-binaries:
     name: Build Binary (${{ matrix.target }})
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     strategy:
       matrix:
         include:

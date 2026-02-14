@@ -15,7 +15,7 @@ sqlx = { version = "0.8.6", features = [
   "time",
   "migrate",
 ] }
-uuid = { version = "1.20.0", features = ["serde", "v4"] }
+uuid = { version = "1.21.0", features = ["serde", "v4"] }
 time = { version = "0.3.47", features = ["serde"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
@@ -26,3 +26,5 @@ tower = "0.5.3"
 tower-http = { version = "0.6.8", features = ["cors"] }
 tower_governor = "0.8.0"
 governor = "0.10.4"
+elasticsearch = "9.1.0-alpha.1"
+anyhow = "1.0.101"

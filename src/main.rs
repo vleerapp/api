@@ -2,10 +2,13 @@ mod api;
 mod db;
 mod models;
 mod rate_limit;
+mod search;
 
 use crate::rate_limit::rate_limit;
+use crate::search::SearchClient;
 use axum::Router;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use tower_http::cors::CorsLayer;
 use tracing::{error, info};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -32,8 +35,29 @@ async fn main() {
 
     info!("Database initialized and migrations applied.");
 
+    let es_url = std::env::var("ELASTICSEARCH_URL").unwrap_or_else(|_| "http://localhost:9200".to_string());
+    let search_client = match SearchClient::new(&es_url) {
+        Ok(client) => {
+            info!("Elasticsearch client created, connecting to: {}", es_url);
+            let client = Arc::new(client);
+            if let Err(e) = client.create_index().await {
+                error!("Failed to create Elasticsearch index: {}", e);
+            } else {
+                match client.count().await {
+                    Ok(count) => info!("Elasticsearch index ready. Indexed documents: {}", count),
+                    Err(e) => info!("Elasticsearch index ready. Could not get count: {}", e),
+                }
+            }
+            client
+        }
+        Err(e) => {
+            error!("Failed to create Elasticsearch client: {}", e);
+            std::process::exit(1);
+        }
+    };
+
     let app = Router::new()
-        .merge(api::app_router())
+        .merge(api::app_router(search_client))
         .layer(CorsLayer::permissive())
         .layer(rate_limit(20, 1000))
         .with_state(pool);
