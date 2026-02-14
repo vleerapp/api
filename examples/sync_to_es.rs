@@ -60,12 +60,13 @@ async fn main() -> Result<()> {
 
     println!("syncing songs");
     let songs = sqlx::query(
-        "SELECT apple_music_id, name, duration_seconds, artwork_url FROM songs LIMIT 10000"
+        "SELECT apple_music_id, name, duration_seconds, artwork_url FROM songs"
     )
     .fetch_all(&pool)
     .await?;
+    println!("  found {} songs", songs.len());
 
-    for song in songs {
+    for (i, song) in songs.iter().enumerate() {
         let doc = json!({
             "apple_music_id": song.get::<String, _>("apple_music_id"),
             "name": song.get::<String, _>("name"),
@@ -80,14 +81,20 @@ async fn main() -> Result<()> {
             .body(doc)
             .send()
             .await;
+        
+        if (i + 1) % 1000 == 0 {
+            println!("  synced {}/{} songs", i + 1, songs.len());
+        }
     }
+    println!("  synced {} songs", songs.len());
 
     println!("syncing artists");
-    let artists = sqlx::query("SELECT apple_music_id, name, artwork_url FROM artists LIMIT 5000")
+    let artists = sqlx::query("SELECT apple_music_id, name, artwork_url FROM artists")
         .fetch_all(&pool)
         .await?;
+    println!("  found {} artists", artists.len());
 
-    for artist in artists {
+    for (i, artist) in artists.iter().enumerate() {
         let doc = json!({
             "apple_music_id": artist.get::<String, _>("apple_music_id"),
             "name": artist.get::<String, _>("name"),
@@ -101,16 +108,22 @@ async fn main() -> Result<()> {
             .body(doc)
             .send()
             .await;
+        
+        if (i + 1) % 1000 == 0 {
+            println!("  synced {}/{} artists", i + 1, artists.len());
+        }
     }
+    println!("  synced {} artists", artists.len());
 
     println!("syncing albums");
     let albums = sqlx::query(
-        "SELECT apple_music_id, name, artwork_url, release_date FROM albums LIMIT 5000"
+        "SELECT apple_music_id, name, artwork_url, release_date FROM albums"
     )
     .fetch_all(&pool)
     .await?;
+    println!("  found {} albums", albums.len());
 
-    for album in albums {
+    for (i, album) in albums.iter().enumerate() {
         let doc = json!({
             "apple_music_id": album.get::<String, _>("apple_music_id"),
             "name": album.get::<String, _>("name"),
@@ -125,8 +138,13 @@ async fn main() -> Result<()> {
             .body(doc)
             .send()
             .await;
+        
+        if (i + 1) % 1000 == 0 {
+            println!("  synced {}/{} albums", i + 1, albums.len());
+        }
     }
+    println!("  synced {} albums", albums.len());
 
-    println!("sync complete");
+    println!("\nsync complete!");
     Ok(())
 }
