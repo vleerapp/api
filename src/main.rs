@@ -10,7 +10,7 @@ use axum::Router;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tower_http::cors::CorsLayer;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[tokio::main]
@@ -45,11 +45,11 @@ async fn main() {
     {
         Ok(p) => {
             info!("Scrape database pool created");
-            p
+            Some(p)
         }
         Err(e) => {
-            error!("Failed to create scrape database pool: {}", e);
-            std::process::exit(1);
+            warn!("Scrape database unavailable, metadata endpoints will be disabled: {}", e);
+            None
         }
     };
 
