@@ -1,13 +1,13 @@
 use anyhow::Result;
 use elasticsearch::{
-    Elasticsearch, SearchParts, GetParts,
+    Elasticsearch, GetParts, SearchParts,
     http::transport::{SingleNodeConnectionPool, TransportBuilder},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sqlx::{PgPool, Row};
 
-use crate::models::metadata::{Album, Artist, Song, SearchResultItem};
+use crate::models::metadata::{Album, Artist, SearchResultItem, Song};
 
 #[derive(Clone)]
 pub struct SearchClient {
@@ -155,16 +155,16 @@ impl SearchClient {
             .unwrap_or(0);
 
         let mut items = Vec::new();
-        
+
         for hit in hits.as_array().unwrap_or(&vec![]) {
             let id = hit["_source"]["id"].as_str().unwrap_or("");
             let item_type = hit["_source"]["item_type"].as_str().unwrap_or("");
-            
+
             if id.is_empty() || item_type.is_empty() {
                 tracing::warn!("Empty id or item_type in ES hit");
                 continue;
             }
-            
+
             match item_type {
                 "song" => {
                     if let Ok(Some(song)) = self.fetch_song_details(pool, id).await {
@@ -189,7 +189,11 @@ impl SearchClient {
                 "artist" => {
                     if let Ok(Some(artist)) = self.fetch_artist_details(pool, id).await {
                         if let Some(artist_name) = artist_filter {
-                            if !artist.name.to_lowercase().contains(&artist_name.to_lowercase()) {
+                            if !artist
+                                .name
+                                .to_lowercase()
+                                .contains(&artist_name.to_lowercase())
+                            {
                                 continue;
                             }
                         }
@@ -199,7 +203,11 @@ impl SearchClient {
                 "album" => {
                     if let Ok(Some(album)) = self.fetch_album_details(pool, id).await {
                         if let Some(artist_name) = artist_filter {
-                            if !album.artist_name.to_lowercase().contains(&artist_name.to_lowercase()) {
+                            if !album
+                                .artist_name
+                                .to_lowercase()
+                                .contains(&artist_name.to_lowercase())
+                            {
                                 continue;
                             }
                         }
@@ -215,10 +223,7 @@ impl SearchClient {
             }
         }
 
-        Ok(AdvancedSearchResult {
-            items,
-            total,
-        })
+        Ok(AdvancedSearchResult { items, total })
     }
 
     pub async fn get_song_by_id(&self, pool: &PgPool, id: &str) -> Result<Option<Song>> {
@@ -297,7 +302,7 @@ impl SearchClient {
                LEFT JOIN albums al ON sal.album_id = al.id
                WHERE s.id = $1
                GROUP BY s.id, s.name, s.artwork_url, s.duration_seconds,
-                        s.disc_number, s.track_number, s.isrc, s.release_date"#
+                        s.disc_number, s.track_number, s.isrc, s.release_date"#,
         )
         .bind(id)
         .fetch_optional(pool)
@@ -307,7 +312,7 @@ impl SearchClient {
             Some(r) => {
                 let artist: String = r.get("artist_names");
                 let album: String = r.get("album_names");
-                
+
                 if artist.is_empty() || album.is_empty() {
                     return Ok(None);
                 }
@@ -318,11 +323,13 @@ impl SearchClient {
                     album,
                     artist,
                     cover: r.get("artwork_url"),
-                    disc_number: r.get::<Option<i32>, _>("disc_number").unwrap_or(1),
-                    track_number: r.get::<Option<i32>, _>("track_number").unwrap_or(1),
-                    duration: r.get::<Option<i32>, _>("duration_seconds").unwrap_or(0),
+                    disc_number: r.get::<Option<i64>, _>("disc_number").unwrap_or(1) as i32,
+                    track_number: r.get::<Option<i64>, _>("track_number").unwrap_or(1) as i32,
+                    duration: r.get::<Option<i64>, _>("duration_seconds").unwrap_or(0) as i32,
                     isrc: r.get::<Option<String>, _>("isrc").unwrap_or_default(),
-                    date: r.get::<Option<String>, _>("release_date").unwrap_or_default(),
+                    date: r
+                        .get::<Option<String>, _>("release_date")
+                        .unwrap_or_default(),
                 }))
             }
             None => Ok(None),
@@ -330,12 +337,10 @@ impl SearchClient {
     }
 
     async fn fetch_artist_details(&self, pool: &PgPool, id: &str) -> Result<Option<Artist>> {
-        let row = sqlx::query(
-            "SELECT id, name, artwork_url FROM artists WHERE id = $1"
-        )
-        .bind(id)
-        .fetch_optional(pool)
-        .await?;
+        let row = sqlx::query("SELECT id, name, artwork_url FROM artists WHERE id = $1")
+            .bind(id)
+            .fetch_optional(pool)
+            .await?;
 
         match row {
             Some(r) => Ok(Some(Artist {
@@ -357,7 +362,7 @@ impl SearchClient {
                LEFT JOIN artists a ON aa.artist_id = a.id
                WHERE al.id = $1
                GROUP BY al.id, al.name, al.artwork_url, al.release_date,
-                        al.track_count, al.upc, al.record_label"#
+                        al.track_count, al.upc, al.record_label"#,
         )
         .bind(id)
         .fetch_optional(pool)
@@ -366,7 +371,7 @@ impl SearchClient {
         match row {
             Some(r) => {
                 let artist_name: String = r.get("artist_names");
-                
+
                 if artist_name.is_empty() {
                     return Ok(None);
                 }
@@ -376,7 +381,9 @@ impl SearchClient {
                     name: r.get("name"),
                     artist_name,
                     artwork_url: r.get("artwork_url"),
-                    release_date: r.get::<Option<String>, _>("release_date").unwrap_or_default(),
+                    release_date: r
+                        .get::<Option<String>, _>("release_date")
+                        .unwrap_or_default(),
                     track_count: r.get::<Option<i32>, _>("track_count").unwrap_or(0),
                     upc: r.get::<Option<String>, _>("upc").unwrap_or_default(),
                     record_label: r.get("record_label"),

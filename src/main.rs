@@ -1,11 +1,11 @@
 mod api;
 mod db;
+mod elasticsearch;
 mod models;
 mod rate_limit;
-mod search;
 
+use crate::elasticsearch::SearchClient;
 use crate::rate_limit::rate_limit;
-use crate::search::SearchClient;
 use axum::Router;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -35,7 +35,26 @@ async fn main() {
 
     info!("Database initialized and migrations applied.");
 
-    let es_url = std::env::var("ELASTICSEARCH_URL").unwrap_or_else(|_| "http://localhost:9200".to_string());
+    let scrape_db_url = std::env::var("SCRAPE_DATABASE_URL").unwrap_or_else(|_| {
+        "postgres://postgres:postgres@localhost:5432/apple_music_scrape".to_string()
+    });
+    let scrape_pool = match sqlx::postgres::PgPoolOptions::new()
+        .max_connections(5)
+        .connect(&scrape_db_url)
+        .await
+    {
+        Ok(p) => {
+            info!("Scrape database pool created");
+            p
+        }
+        Err(e) => {
+            error!("Failed to create scrape database pool: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    let es_url =
+        std::env::var("ELASTICSEARCH_URL").unwrap_or_else(|_| "http://localhost:9200".to_string());
     let search_client = match SearchClient::new(&es_url) {
         Ok(client) => {
             info!("Elasticsearch client created, connecting to: {}", es_url);
@@ -57,10 +76,9 @@ async fn main() {
     };
 
     let app = Router::new()
-        .merge(api::app_router(search_client))
+        .merge(api::app_router(search_client, pool, scrape_pool))
         .layer(CorsLayer::permissive())
-        .layer(rate_limit(20, 1000))
-        .with_state(pool);
+        .layer(rate_limit(20, 1000));
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
     info!("Server listening on http://0.0.0.0:3000");

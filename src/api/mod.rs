@@ -1,13 +1,15 @@
+use crate::elasticsearch::SearchClient;
 use axum::{Router, body::Body, extract::Request, routing::any};
 use sqlx::PgPool;
 use std::sync::Arc;
-use crate::search::SearchClient;
 
-pub mod v1;
+pub mod metadata;
+pub mod telemetry;
 pub mod validation;
 
-pub fn app_router(search_client: Arc<SearchClient>) -> Router<PgPool> {
+pub fn app_router(search_client: Arc<SearchClient>, pool: PgPool, scrape_pool: PgPool) -> Router {
     Router::new()
-        .nest("/v1", v1::router(search_client))
+        .nest("/metadata", metadata::router(search_client, scrape_pool))
+        .nest("/telemetry", telemetry::router().with_state(pool))
         .route("/", any(|_: Request<Body>| async { "Healthy" }))
 }

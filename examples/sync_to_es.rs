@@ -1,11 +1,14 @@
 use anyhow::Result;
 use elasticsearch::{
-    Elasticsearch, IndexParts,
+    BulkOperation, BulkParts, Elasticsearch,
     http::transport::{SingleNodeConnectionPool, TransportBuilder},
 };
 use serde_json::json;
 use sqlx::{PgPool, Row};
 use std::env;
+use futures::TryStreamExt;
+
+const BATCH_SIZE: usize = 5000;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -20,131 +23,222 @@ async fn main() -> Result<()> {
     let transport = TransportBuilder::new(es_pool).build()?;
     let client = Elasticsearch::new(transport);
 
-    let mapping = json!({
-        "settings": {
-            "number_of_shards": 3,
-            "number_of_replicas": 0,
-            "analysis": {
-                "analyzer": {
-                    "music_analyzer": {
-                        "tokenizer": "standard",
-                        "filter": ["lowercase", "asciifolding", "edge_ngram_filter"]
-                    }
-                },
-                "filter": {
-                    "edge_ngram_filter": {
-                        "type": "edge_ngram",
-                        "min_gram": 2,
-                        "max_gram": 20
+    let index_exists = client
+        .indices()
+        .exists(elasticsearch::indices::IndicesExistsParts::Index(&["music"]))
+        .send()
+        .await?;
+    
+    if !index_exists.status_code().is_success() {
+        println!("Creating 'music' index...");
+        let mapping = json!({
+            "settings": {
+                "number_of_shards": 3,
+                "number_of_replicas": 0,
+                "analysis": {
+                    "analyzer": {
+                        "music_analyzer": {
+                            "tokenizer": "standard",
+                            "filter": ["lowercase", "asciifolding", "edge_ngram_filter"]
+                        }
+                    },
+                    "filter": {
+                        "edge_ngram_filter": {
+                            "type": "edge_ngram",
+                            "min_gram": 2,
+                            "max_gram": 20
+                        }
                     }
                 }
+            },
+            "mappings": {
+                "properties": {
+                    "id": {"type": "keyword"},
+                    "apple_music_id": {"type": "keyword"},
+                    "name": {"type": "text", "analyzer": "music_analyzer"},
+                    "artist_name": {"type": "text", "analyzer": "music_analyzer"},
+                    "album_name": {"type": "text", "analyzer": "music_analyzer"},
+                    "item_type": {"type": "keyword"},
+                    "artwork_url": {"type": "keyword", "index": false}
+                }
             }
-        },
-        "mappings": {
-            "properties": {
-                "name": {"type": "text", "analyzer": "music_analyzer"},
-                "artist_name": {"type": "text", "analyzer": "music_analyzer"},
-                "album_name": {"type": "text", "analyzer": "music_analyzer"},
-                "item_type": {"type": "keyword"},
-                "artwork_url": {"type": "keyword", "index": false}
-            }
-        }
-    });
+        });
 
-    let _ = client
-        .indices()
-        .create(elasticsearch::indices::IndicesCreateParts::Index("music"))
-        .body(mapping)
-        .send()
-        .await;
+        let _ = client
+            .indices()
+            .create(elasticsearch::indices::IndicesCreateParts::Index("music"))
+            .body(mapping)
+            .send()
+            .await?;
+    }
 
-    println!("syncing songs");
-    let songs = sqlx::query(
-        "SELECT apple_music_id, name, duration_seconds, artwork_url FROM songs"
+    sync_songs(&pool, &client).await?;
+    sync_artists(&pool, &client).await?;
+    sync_albums(&pool, &client).await?;
+
+    println!("\nSync complete");
+    Ok(())
+}
+
+async fn sync_songs(pool: &PgPool, client: &Elasticsearch) -> Result<()> {
+    println!("\nSyncing songs...");
+    
+    let mut stream = sqlx::query(
+        "SELECT s.id, s.apple_music_id, s.name, s.duration_seconds, s.artwork_url, 
+                COALESCE(array_agg(a.name) FILTER (WHERE a.name IS NOT NULL), ARRAY[]::text[]) as artist_names
+         FROM songs s
+         LEFT JOIN song_artists sa ON s.id = sa.song_id
+         LEFT JOIN artists a ON sa.artist_id = a.id
+         GROUP BY s.id, s.apple_music_id, s.name, s.duration_seconds, s.artwork_url"
     )
-    .fetch_all(&pool)
-    .await?;
-    println!("  found {} songs", songs.len());
+    .fetch(pool);
 
-    for (i, song) in songs.iter().enumerate() {
-        let doc = json!({
-            "apple_music_id": song.get::<String, _>("apple_music_id"),
-            "name": song.get::<String, _>("name"),
-            "artwork_url": song.get::<String, _>("artwork_url"),
-            "duration_seconds": song.get::<i64, _>("duration_seconds"),
+    let mut batch = Vec::with_capacity(BATCH_SIZE);
+    let mut total = 0usize;
+    let start = std::time::Instant::now();
+
+    while let Some(row) = stream.try_next().await? {
+        let artist_names: Vec<String> = row.get("artist_names");
+        let artist_name = artist_names.first().cloned();
+        
+        let id = row.get::<String, _>("id");
+        let mut doc = json!({
+            "id": &id,
+            "apple_music_id": row.get::<String, _>("apple_music_id"),
+            "name": row.get::<String, _>("name"),
+            "artwork_url": row.get::<String, _>("artwork_url"),
+            "duration_seconds": row.get::<i64, _>("duration_seconds"),
             "item_type": "song"
         });
-
-        let doc_id = format!("song_{}", song.get::<String, _>("apple_music_id"));
-        let _ = client
-            .index(IndexParts::IndexId("music", &doc_id))
-            .body(doc)
-            .send()
-            .await;
         
-        if (i + 1) % 1000 == 0 {
-            println!("  synced {}/{} songs", i + 1, songs.len());
+        if let Some(artist) = artist_name {
+            doc["artist_name"] = json!(artist);
+        }
+        
+        batch.push(BulkOperation::index(doc).id(&id).into());
+
+        if batch.len() >= BATCH_SIZE {
+            total += send_bulk(client, &batch).await?;
+            batch.clear();
+            
+            let elapsed = start.elapsed().as_secs();
+            let rate = if elapsed > 0 { total / elapsed as usize } else { 0 };
+            println!("  Songs: {} ({} docs/sec)", total, rate);
         }
     }
-    println!("  synced {} songs", songs.len());
 
-    println!("syncing artists");
-    let artists = sqlx::query("SELECT apple_music_id, name, artwork_url FROM artists")
-        .fetch_all(&pool)
-        .await?;
-    println!("  found {} artists", artists.len());
+    if !batch.is_empty() {
+        total += send_bulk(client, &batch).await?;
+    }
 
-    for (i, artist) in artists.iter().enumerate() {
+    let elapsed = start.elapsed().as_secs();
+    let rate = if elapsed > 0 { total / elapsed as usize } else { 0 };
+    println!("  Total songs: {} ({} docs/sec, {}s elapsed)", total, rate, elapsed);
+    Ok(())
+}
+
+async fn sync_artists(pool: &PgPool, client: &Elasticsearch) -> Result<()> {
+    println!("\nSyncing artists...");
+    
+    let mut stream = sqlx::query(
+        "SELECT id, apple_music_id, name, artwork_url FROM artists"
+    )
+    .fetch(pool);
+
+    let mut batch = Vec::with_capacity(BATCH_SIZE);
+    let mut total = 0usize;
+    let start = std::time::Instant::now();
+
+    while let Some(row) = stream.try_next().await? {
+        let id = row.get::<String, _>("id");
         let doc = json!({
-            "apple_music_id": artist.get::<String, _>("apple_music_id"),
-            "name": artist.get::<String, _>("name"),
-            "artwork_url": artist.get::<String, _>("artwork_url"),
+            "id": &id,
+            "apple_music_id": row.get::<String, _>("apple_music_id"),
+            "name": row.get::<String, _>("name"),
+            "artwork_url": row.get::<String, _>("artwork_url"),
             "item_type": "artist"
         });
-
-        let doc_id = format!("artist_{}", artist.get::<String, _>("apple_music_id"));
-        let _ = client
-            .index(IndexParts::IndexId("music", &doc_id))
-            .body(doc)
-            .send()
-            .await;
         
-        if (i + 1) % 1000 == 0 {
-            println!("  synced {}/{} artists", i + 1, artists.len());
+        batch.push(BulkOperation::index(doc).id(&id).into());
+
+        if batch.len() >= BATCH_SIZE {
+            total += send_bulk(client, &batch).await?;
+            batch.clear();
+            
+            let elapsed = start.elapsed().as_secs();
+            let rate = if elapsed > 0 { total / elapsed as usize } else { 0 };
+            println!("  Artists: {} ({} docs/sec)", total, rate);
         }
     }
-    println!("  synced {} artists", artists.len());
 
-    println!("syncing albums");
-    let albums = sqlx::query(
-        "SELECT apple_music_id, name, artwork_url, release_date FROM albums"
+    if !batch.is_empty() {
+        total += send_bulk(client, &batch).await?;
+    }
+
+    let elapsed = start.elapsed().as_secs();
+    let rate = if elapsed > 0 { total / elapsed as usize } else { 0 };
+    println!("  Total artists: {} ({} docs/sec, {}s elapsed)", total, rate, elapsed);
+    Ok(())
+}
+
+async fn sync_albums(pool: &PgPool, client: &Elasticsearch) -> Result<()> {
+    println!("\nSyncing albums...");
+    
+    let mut stream = sqlx::query(
+        "SELECT id, apple_music_id, name, artwork_url, release_date FROM albums"
     )
-    .fetch_all(&pool)
-    .await?;
-    println!("  found {} albums", albums.len());
+    .fetch(pool);
 
-    for (i, album) in albums.iter().enumerate() {
+    let mut batch = Vec::with_capacity(BATCH_SIZE);
+    let mut total = 0usize;
+    let start = std::time::Instant::now();
+
+    while let Some(row) = stream.try_next().await? {
+        let id = row.get::<String, _>("id");
         let doc = json!({
-            "apple_music_id": album.get::<String, _>("apple_music_id"),
-            "name": album.get::<String, _>("name"),
-            "artwork_url": album.get::<String, _>("artwork_url"),
-            "release_date": album.get::<String, _>("release_date"),
+            "id": &id,
+            "apple_music_id": row.get::<String, _>("apple_music_id"),
+            "name": row.get::<String, _>("name"),
+            "artwork_url": row.get::<String, _>("artwork_url"),
+            "release_date": row.get::<String, _>("release_date"),
             "item_type": "album"
         });
-
-        let doc_id = format!("album_{}", album.get::<String, _>("apple_music_id"));
-        let _ = client
-            .index(IndexParts::IndexId("music", &doc_id))
-            .body(doc)
-            .send()
-            .await;
         
-        if (i + 1) % 1000 == 0 {
-            println!("  synced {}/{} albums", i + 1, albums.len());
+        batch.push(BulkOperation::index(doc).id(&id).into());
+
+        if batch.len() >= BATCH_SIZE {
+            total += send_bulk(client, &batch).await?;
+            batch.clear();
+            
+            let elapsed = start.elapsed().as_secs();
+            let rate = if elapsed > 0 { total / elapsed as usize } else { 0 };
+            println!("  Albums: {} ({} docs/sec)", total, rate);
         }
     }
-    println!("  synced {} albums", albums.len());
 
-    println!("\nsync complete!");
+    if !batch.is_empty() {
+        total += send_bulk(client, &batch).await?;
+    }
+
+    let elapsed = start.elapsed().as_secs();
+    let rate = if elapsed > 0 { total / elapsed as usize } else { 0 };
+    println!("  Total albums: {} ({} docs/sec, {}s elapsed)", total, rate, elapsed);
     Ok(())
+}
+
+async fn send_bulk(client: &Elasticsearch, batch: &[BulkOperation<serde_json::Value>]) -> Result<usize> {
+    let response = client
+        .bulk(BulkParts::Index("music"))
+        .body(batch.to_vec())
+        .send()
+        .await?;
+    
+    let json = response.json::<serde_json::Value>().await?;
+    let items = json["items"].as_array().map(|a| a.len()).unwrap_or(0);
+    
+    if json["errors"].as_bool().unwrap_or(false) {
+        eprintln!("  Warning: Bulk errors occurred");
+    }
+    
+    Ok(items)
 }
