@@ -59,7 +59,7 @@ async fn main() -> Result<()> {
                     "artist_name": {"type": "text", "analyzer": "music_analyzer"},
                     "album_name": {"type": "text", "analyzer": "music_analyzer"},
                     "item_type": {"type": "keyword"},
-                    "artwork_url": {"type": "keyword", "index": false}
+                    "image": {"type": "keyword", "index": false}
                 }
             }
         });
@@ -84,12 +84,12 @@ async fn sync_songs(pool: &PgPool, client: &Elasticsearch) -> Result<()> {
     println!("\nSyncing songs...");
     
     let mut stream = sqlx::query(
-        "SELECT s.id, s.apple_music_id, s.name, s.duration_seconds, s.artwork_url, 
+        "SELECT s.id, s.apple_music_id, s.name, s.duration, s.image, 
                 COALESCE(array_agg(a.name) FILTER (WHERE a.name IS NOT NULL), ARRAY[]::text[]) as artist_names
          FROM songs s
          LEFT JOIN song_artists sa ON s.id = sa.song_id
          LEFT JOIN artists a ON sa.artist_id = a.id
-         GROUP BY s.id, s.apple_music_id, s.name, s.duration_seconds, s.artwork_url"
+         GROUP BY s.id, s.apple_music_id, s.name, s.duration, s.image"
     )
     .fetch(pool);
 
@@ -106,8 +106,8 @@ async fn sync_songs(pool: &PgPool, client: &Elasticsearch) -> Result<()> {
             "id": &id,
             "apple_music_id": row.get::<String, _>("apple_music_id"),
             "name": row.get::<String, _>("name"),
-            "artwork_url": row.get::<String, _>("artwork_url"),
-            "duration_seconds": row.get::<i64, _>("duration_seconds"),
+            "image": row.get::<String, _>("image"),
+            "duration": row.get::<i64, _>("duration"),
             "item_type": "song"
         });
         
@@ -141,7 +141,7 @@ async fn sync_artists(pool: &PgPool, client: &Elasticsearch) -> Result<()> {
     println!("\nSyncing artists...");
     
     let mut stream = sqlx::query(
-        "SELECT id, apple_music_id, name, artwork_url FROM artists"
+        "SELECT id, apple_music_id, name, image FROM artists"
     )
     .fetch(pool);
 
@@ -155,7 +155,7 @@ async fn sync_artists(pool: &PgPool, client: &Elasticsearch) -> Result<()> {
             "id": &id,
             "apple_music_id": row.get::<String, _>("apple_music_id"),
             "name": row.get::<String, _>("name"),
-            "artwork_url": row.get::<String, _>("artwork_url"),
+            "image": row.get::<String, _>("image"),
             "item_type": "artist"
         });
         
@@ -185,7 +185,7 @@ async fn sync_albums(pool: &PgPool, client: &Elasticsearch) -> Result<()> {
     println!("\nSyncing albums...");
     
     let mut stream = sqlx::query(
-        "SELECT id, apple_music_id, name, artwork_url, release_date FROM albums"
+        "SELECT id, apple_music_id, name, image, date FROM albums"
     )
     .fetch(pool);
 
@@ -199,8 +199,8 @@ async fn sync_albums(pool: &PgPool, client: &Elasticsearch) -> Result<()> {
             "id": &id,
             "apple_music_id": row.get::<String, _>("apple_music_id"),
             "name": row.get::<String, _>("name"),
-            "artwork_url": row.get::<String, _>("artwork_url"),
-            "release_date": row.get::<String, _>("release_date"),
+            "image": row.get::<String, _>("image"),
+            "date": row.get::<String, _>("date"),
             "item_type": "album"
         });
         

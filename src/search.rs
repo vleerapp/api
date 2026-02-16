@@ -199,7 +199,7 @@ impl SearchClient {
                 "album" => {
                     if let Ok(Some(album)) = self.fetch_album_details(pool, id).await {
                         if let Some(artist_name) = artist_filter {
-                            if !album.artist_name.to_lowercase().contains(&artist_name.to_lowercase()) {
+                            if !album.artist.to_lowercase().contains(&artist_name.to_lowercase()) {
                                 continue;
                             }
                         }
@@ -286,8 +286,8 @@ impl SearchClient {
 
     async fn fetch_song_details(&self, pool: &PgPool, id: &str) -> Result<Option<Song>> {
         let row = sqlx::query(
-            r#"SELECT s.id, s.name, s.artwork_url, s.duration_seconds, 
-                      s.disc_number, s.track_number, s.isrc, s.release_date,
+            r#"SELECT s.id, s.name, s.image, s.duration, 
+                      s.disc_number, s.track_number, s.isrc, s.date,
                       string_agg(DISTINCT a.name, ', ') as artist_names,
                       string_agg(DISTINCT al.name, ', ') as album_names
                FROM songs s
@@ -296,8 +296,8 @@ impl SearchClient {
                LEFT JOIN song_albums sal ON s.id = sal.song_id
                LEFT JOIN albums al ON sal.album_id = al.id
                WHERE s.id = $1
-               GROUP BY s.id, s.name, s.artwork_url, s.duration_seconds,
-                        s.disc_number, s.track_number, s.isrc, s.release_date"#
+               GROUP BY s.id, s.name, s.image, s.duration,
+                        s.disc_number, s.track_number, s.isrc, s.date"#
         )
         .bind(id)
         .fetch_optional(pool)
@@ -315,14 +315,14 @@ impl SearchClient {
                 Ok(Some(Song {
                     id: r.get("id"),
                     name: r.get("name"),
-                    album,
                     artist,
-                    cover: r.get("artwork_url"),
+                    album,
+                    image: r.get("image"),
                     disc_number: r.get::<Option<i32>, _>("disc_number").unwrap_or(1),
                     track_number: r.get::<Option<i32>, _>("track_number").unwrap_or(1),
-                    duration: r.get::<Option<i32>, _>("duration_seconds").unwrap_or(0),
+                    duration: r.get::<Option<i32>, _>("duration").unwrap_or(0),
                     isrc: r.get::<Option<String>, _>("isrc").unwrap_or_default(),
-                    date: r.get::<Option<String>, _>("release_date").unwrap_or_default(),
+                    date: r.get::<Option<String>, _>("date").unwrap_or_default(),
                 }))
             }
             None => Ok(None),
@@ -331,7 +331,7 @@ impl SearchClient {
 
     async fn fetch_artist_details(&self, pool: &PgPool, id: &str) -> Result<Option<Artist>> {
         let row = sqlx::query(
-            "SELECT id, name, artwork_url FROM artists WHERE id = $1"
+            "SELECT id, name, image FROM artists WHERE id = $1"
         )
         .bind(id)
         .fetch_optional(pool)
@@ -341,7 +341,7 @@ impl SearchClient {
             Some(r) => Ok(Some(Artist {
                 id: r.get("id"),
                 name: r.get("name"),
-                cover: r.get("artwork_url"),
+                image: r.get("image"),
             })),
             None => Ok(None),
         }
@@ -349,15 +349,15 @@ impl SearchClient {
 
     async fn fetch_album_details(&self, pool: &PgPool, id: &str) -> Result<Option<Album>> {
         let row = sqlx::query(
-            r#"SELECT al.id, al.name, al.artwork_url, al.release_date, 
-                      al.track_count, al.upc, al.record_label,
+            r#"SELECT al.id, al.name, al.image, al.date, 
+                      al.track_count, al.upc, al.label,
                       string_agg(DISTINCT a.name, ', ') as artist_names
                FROM albums al
                LEFT JOIN artist_albums aa ON al.id = aa.album_id
                LEFT JOIN artists a ON aa.artist_id = a.id
                WHERE al.id = $1
-               GROUP BY al.id, al.name, al.artwork_url, al.release_date,
-                        al.track_count, al.upc, al.record_label"#
+               GROUP BY al.id, al.name, al.image, al.date,
+                        al.track_count, al.upc, al.label"#
         )
         .bind(id)
         .fetch_optional(pool)
@@ -374,12 +374,12 @@ impl SearchClient {
                 Ok(Some(Album {
                     id: r.get("id"),
                     name: r.get("name"),
-                    artist_name,
-                    artwork_url: r.get("artwork_url"),
-                    release_date: r.get::<Option<String>, _>("release_date").unwrap_or_default(),
+                    artist: artist_name,
+                    image: r.get("image"),
+                    date: r.get::<Option<String>, _>("date").unwrap_or_default(),
                     track_count: r.get::<Option<i32>, _>("track_count").unwrap_or(0),
                     upc: r.get::<Option<String>, _>("upc").unwrap_or_default(),
-                    record_label: r.get("record_label"),
+                    label: r.get("label"),
                 }))
             }
             None => Ok(None),

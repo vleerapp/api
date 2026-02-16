@@ -4,9 +4,9 @@ use serde::{Deserialize, Serialize};
 pub struct Song {
     pub id: String,
     pub name: String,
-    pub album: String,
     pub artist: String,
-    pub cover: String,
+    pub album: String,
+    pub image: String,
     #[serde(rename = "disc_number")]
     pub disc_number: i32,
     #[serde(rename = "track_number")]
@@ -20,24 +20,20 @@ pub struct Song {
 pub struct Artist {
     pub id: String,
     pub name: String,
-    pub cover: String,
+    pub image: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Album {
     pub id: String,
-    #[serde(rename = "artist_name")]
-    pub artist_name: String,
     pub name: String,
-    #[serde(rename = "artwork_url")]
-    pub artwork_url: String,
-    #[serde(rename = "release_date")]
-    pub release_date: String,
+    pub artist: String,
+    pub image: String,
+    pub date: String,
     #[serde(rename = "track_count")]
     pub track_count: i32,
     pub upc: String,
-    #[serde(rename = "record_label")]
-    pub record_label: Option<String>,
+    pub label: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
