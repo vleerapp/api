@@ -146,14 +146,14 @@ async fn get_songs_over_time(
             -- Use time_bucket_gapfill for continuous time series (Grafana needs this)
             SELECT 
                 time_bucket_gapfill($3::INTERVAL, bucket, $1::TIMESTAMPTZ, $2::TIMESTAMPTZ) as gf_bucket,
-                interpolate(bucket_total) as value
+                interpolate(bucket_total) as gf_value
             FROM bucket_totals
         )
         SELECT 
-            COALESCE(gf_bucket, bucket) as bucket,
-            COALESCE(value, bucket_total) as value
-        FROM gapfilled
-        FULL OUTER JOIN bucket_totals ON gf_bucket = bucket
+            COALESCE(g.gf_bucket, bt.bucket) as bucket,
+            COALESCE(g.gf_value, bt.bucket_total, (SELECT total FROM baseline_total)) as value
+        FROM gapfilled g
+        FULL OUTER JOIN bucket_totals bt ON g.gf_bucket = bt.bucket
         ORDER BY bucket ASC
         "#,
     )
@@ -218,14 +218,14 @@ async fn get_users_over_time(
             -- Gapfill for continuous time series
             SELECT 
                 time_bucket_gapfill($3::INTERVAL, bucket, $1::TIMESTAMPTZ, $2::TIMESTAMPTZ) as gf_bucket,
-                interpolate(value) as value
+                interpolate(value) as gf_value
             FROM cumulative
         )
         SELECT 
-            COALESCE(gf_bucket, bucket) as bucket,
-            COALESCE(value, (SELECT initial_count FROM baseline)) as value
-        FROM gapfilled
-        FULL OUTER JOIN cumulative ON gf_bucket = bucket
+            COALESCE(g.gf_bucket, c.bucket) as bucket,
+            COALESCE(g.gf_value, c.value, (SELECT initial_count FROM baseline)) as value
+        FROM gapfilled g
+        FULL OUTER JOIN cumulative c ON g.gf_bucket = c.bucket
         ORDER BY bucket ASC
         "#,
     )
