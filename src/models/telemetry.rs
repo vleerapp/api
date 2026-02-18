@@ -53,6 +53,9 @@ pub struct StatsQuery {
     #[serde(default)]
     #[serde(with = "time::serde::rfc3339::option")]
     pub from: Option<OffsetDateTime>,
+    #[serde(default)]
+    #[serde(with = "time::serde::rfc3339::option")]
+    pub to: Option<OffsetDateTime>,
 }
 
 #[derive(Serialize, sqlx::FromRow)]

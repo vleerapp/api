@@ -13,6 +13,47 @@ use crate::{
     rate_limit::rate_limit,
 };
 
+fn calculate_bucket_interval(from: &OffsetDateTime, to: &OffsetDateTime) -> i64 {
+    let duration_secs = (to.unix_timestamp() - from.unix_timestamp()).max(1);
+
+    let target_points = 150;
+    let interval_secs = duration_secs / target_points;
+
+    if interval_secs < 60 {
+        if interval_secs < 20 { 10 } else { 30 }
+    } else if interval_secs < 3600 {
+        if interval_secs < 180 {
+            60
+        } else if interval_secs < 450 {
+            300
+        } else if interval_secs < 750 {
+            600
+        } else if interval_secs < 1350 {
+            900
+        } else {
+            1800
+        }
+    } else if interval_secs < 86400 {
+        if interval_secs < 5400 {
+            3600
+        } else if interval_secs < 10800 {
+            7200
+        } else if interval_secs < 18000 {
+            10800
+        } else if interval_secs < 32400 {
+            21600
+        } else {
+            43200
+        }
+    } else {
+        if interval_secs < 432000 {
+            86400
+        } else {
+            604800
+        }
+    }
+}
+
 pub fn router() -> Router<PgPool> {
     let ingest_routes = Router::new()
         .route("/", post(submit_telemetry))
@@ -63,59 +104,62 @@ async fn get_songs_over_time(
     let start = params
         .from
         .unwrap_or_else(|| OffsetDateTime::now_utc() - time::Duration::days(30));
+    let end = params.to.unwrap_or_else(|| OffsetDateTime::now_utc());
+
+    // Calculate interval based on time range (Grafana-friendly bucketing)
+    let interval_secs = calculate_bucket_interval(&start, &end);
 
     let points = sqlx::query_as::<_, TimeSeriesPoint>(
         r#"
-        WITH baseline_state AS (
-            SELECT DISTINCT ON (user_id) 
-                user_id, 
-                song_count::BIGINT as last_val
+        WITH baseline AS (
+            -- Get the last known song count for each user before the time range
+            SELECT DISTINCT ON (user_id)
+                user_id,
+                song_count::FLOAT8 as last_val
             FROM telemetry
             WHERE time < $1
             ORDER BY user_id, time DESC
         ),
-        initial_global_sum AS (
-            SELECT COALESCE(SUM(last_val), 0)::FLOAT8 as total_val 
-            FROM baseline_state
+        baseline_total AS (
+            SELECT COALESCE(SUM(last_val), 0)::FLOAT8 as total
+            FROM baseline
         ),
-        deltas AS (
+        bucketed AS (
+            -- Aggregate telemetry into time buckets using TimescaleDB time_bucket
             SELECT 
-                t.time,
-                (t.song_count::BIGINT - COALESCE(
-                    LAG(t.song_count::BIGINT) OVER (PARTITION BY t.user_id ORDER BY t.time), 
-                    b.last_val, 
-                    0
-                )) as change
-            FROM telemetry t
-            LEFT JOIN baseline_state b ON t.user_id = b.user_id
-            WHERE t.time >= $1
+                time_bucket($3::INTERVAL, time) as bucket,
+                user_id,
+                last(song_count, time)::FLOAT8 as song_count
+            FROM telemetry
+            WHERE time >= $1 AND time <= $2
+            GROUP BY bucket, user_id
         ),
-        valid_changes AS (
+        bucket_totals AS (
+            -- Sum across all users per bucket
             SELECT 
-                time as bucket,
-                (SUM(change) OVER (ORDER BY time) + (SELECT total_val FROM initial_global_sum))::FLOAT8 as value
-            FROM deltas
-            WHERE change > 0
+                bucket,
+                SUM(song_count) as bucket_total
+            FROM bucketed
+            GROUP BY bucket
         ),
-        final_point AS (
-            SELECT value FROM valid_changes ORDER BY bucket DESC LIMIT 1
+        gapfilled AS (
+            -- Use time_bucket_gapfill for continuous time series (Grafana needs this)
+            SELECT 
+                time_bucket_gapfill($3::INTERVAL, bucket, $1::TIMESTAMPTZ, $2::TIMESTAMPTZ) as gf_bucket,
+                interpolate(bucket_total) as value
+            FROM bucket_totals
         )
         SELECT 
-            $1 as bucket, 
-            (SELECT total_val FROM initial_global_sum) as value 
-        UNION ALL
-        SELECT bucket, value FROM valid_changes
-        UNION ALL
-        SELECT 
-            NOW() as bucket, 
-            COALESCE(
-                (SELECT value FROM final_point), 
-                (SELECT total_val FROM initial_global_sum)
-            ) as value
+            COALESCE(gf_bucket, bucket) as bucket,
+            COALESCE(value, bucket_total) as value
+        FROM gapfilled
+        FULL OUTER JOIN bucket_totals ON gf_bucket = bucket
         ORDER BY bucket ASC
         "#,
     )
     .bind(start)
+    .bind(end)
+    .bind(format!("{} seconds", interval_secs))
     .fetch_all(&pool)
     .await
     .map_err(|e| {
@@ -133,47 +177,61 @@ async fn get_users_over_time(
     let start = params
         .from
         .unwrap_or_else(|| OffsetDateTime::now_utc() - time::Duration::days(30));
+    let end = params.to.unwrap_or_else(|| OffsetDateTime::now_utc());
+
+    let interval_secs = calculate_bucket_interval(&start, &end);
 
     let points = sqlx::query_as::<_, TimeSeriesPoint>(
         r#"
-        WITH initial_stats AS (
+        WITH baseline AS (
+            -- Count users seen before the time range
             SELECT COUNT(DISTINCT user_id)::FLOAT8 as initial_count
             FROM telemetry
             WHERE time < $1
         ),
-        new_user_events AS (
+        first_seen_per_user AS (
+            -- Find when each user first appeared
             SELECT 
-                user_id, 
+                user_id,
                 MIN(time) as first_seen
             FROM telemetry
             GROUP BY user_id
-            HAVING MIN(time) >= $1
         ),
-        timeline AS (
+        bucketed_users AS (
+            -- Bucket users by their first seen time
             SELECT 
-                first_seen as bucket,
-                ((SELECT initial_count FROM initial_stats) + RANK() OVER (ORDER BY first_seen))::FLOAT8 as value
-            FROM new_user_events
+                time_bucket($3::INTERVAL, first_seen) as bucket,
+                COUNT(*)::FLOAT8 as new_users
+            FROM first_seen_per_user
+            WHERE first_seen >= $1 AND first_seen <= $2
+            GROUP BY bucket
         ),
-        final_point AS (
-            SELECT value FROM timeline ORDER BY bucket DESC LIMIT 1
+        cumulative AS (
+            -- Calculate running total using TimescaleDB's ordered aggregation
+            SELECT 
+                bucket,
+                (SELECT initial_count FROM baseline) + 
+                SUM(new_users) OVER (ORDER BY bucket ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) as value
+            FROM bucketed_users
+        ),
+        gapfilled AS (
+            -- Gapfill for continuous time series
+            SELECT 
+                time_bucket_gapfill($3::INTERVAL, bucket, $1::TIMESTAMPTZ, $2::TIMESTAMPTZ) as gf_bucket,
+                interpolate(value) as value
+            FROM cumulative
         )
         SELECT 
-            $1 as bucket, 
-            (SELECT initial_count FROM initial_stats) as value
-        UNION ALL
-        SELECT bucket, value FROM timeline
-        UNION ALL
-        SELECT 
-            NOW() as bucket, 
-            COALESCE(
-                (SELECT value FROM final_point), 
-                (SELECT initial_count FROM initial_stats)
-            ) as value
+            COALESCE(gf_bucket, bucket) as bucket,
+            COALESCE(value, (SELECT initial_count FROM baseline)) as value
+        FROM gapfilled
+        FULL OUTER JOIN cumulative ON gf_bucket = bucket
         ORDER BY bucket ASC
         "#,
     )
     .bind(start)
+    .bind(end)
+    .bind(format!("{} seconds", interval_secs))
     .fetch_all(&pool)
     .await
     .map_err(|e| {
