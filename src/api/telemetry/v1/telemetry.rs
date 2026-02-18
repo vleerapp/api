@@ -142,8 +142,18 @@ async fn get_songs_over_time(
             FROM gapfilled g
             FULL OUTER JOIN cumulative c ON g.gf_bucket = c.bucket
             WHERE COALESCE(g.gf_bucket, c.bucket) IS NOT NULL
+        ),
+        -- Only keep points where value changed from previous point
+        changes_only AS (
+            SELECT 
+                bucket,
+                value,
+                LAG(value) OVER (ORDER BY bucket) as prev_value
+            FROM all_points
         )
-        SELECT bucket, value FROM all_points ORDER BY bucket ASC
+        SELECT bucket, value FROM changes_only 
+        WHERE prev_value IS NULL OR value != prev_value
+        ORDER BY bucket ASC
         "#,
     )
     .bind(start)
