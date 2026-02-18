@@ -13,47 +13,6 @@ use crate::{
     rate_limit::rate_limit,
 };
 
-fn calculate_bucket_interval(from: &OffsetDateTime, to: &OffsetDateTime) -> i64 {
-    let duration_secs = (to.unix_timestamp() - from.unix_timestamp()).max(1);
-
-    let target_points = 150;
-    let interval_secs = duration_secs / target_points;
-
-    if interval_secs < 60 {
-        if interval_secs < 20 { 10 } else { 30 }
-    } else if interval_secs < 3600 {
-        if interval_secs < 180 {
-            60
-        } else if interval_secs < 450 {
-            300
-        } else if interval_secs < 750 {
-            600
-        } else if interval_secs < 1350 {
-            900
-        } else {
-            1800
-        }
-    } else if interval_secs < 86400 {
-        if interval_secs < 5400 {
-            3600
-        } else if interval_secs < 10800 {
-            7200
-        } else if interval_secs < 18000 {
-            10800
-        } else if interval_secs < 32400 {
-            21600
-        } else {
-            43200
-        }
-    } else {
-        if interval_secs < 432000 {
-            86400
-        } else {
-            604800
-        }
-    }
-}
-
 pub fn router() -> Router<PgPool> {
     let ingest_routes = Router::new()
         .route("/", post(submit_telemetry))
@@ -124,37 +83,67 @@ async fn get_songs_over_time(
             SELECT COALESCE(SUM(last_val), 0)::FLOAT8 as total
             FROM baseline
         ),
-        bucketed AS (
-            -- Aggregate telemetry into time buckets using TimescaleDB time_bucket
+        -- Get all telemetry data in range ordered by time
+        ordered_telemetry AS (
             SELECT 
-                time_bucket($3::INTERVAL, time) as bucket,
+                time,
                 user_id,
-                last(song_count, time)::FLOAT8 as song_count
+                song_count::FLOAT8 as song_count,
+                time_bucket($3::INTERVAL, time) as bucket
             FROM telemetry
             WHERE time >= $1 AND time <= $2
-            GROUP BY bucket, user_id
+            ORDER BY user_id, time
         ),
-        bucket_totals AS (
-            -- Sum across all users per bucket
+        -- Calculate deltas from previous row or baseline
+        deltas AS (
             SELECT 
                 bucket,
-                SUM(song_count) as bucket_total
-            FROM bucketed
+                user_id,
+                song_count,
+                song_count - COALESCE(
+                    LAG(song_count) OVER (PARTITION BY user_id ORDER BY time),
+                    (SELECT b.last_val FROM baseline b WHERE b.user_id = ordered_telemetry.user_id),
+                    0
+                ) as delta
+            FROM ordered_telemetry
+        ),
+        -- Sum all deltas per bucket (this gives us the change in total songs)
+        bucket_changes AS (
+            SELECT 
+                bucket,
+                SUM(delta) as bucket_delta
+            FROM deltas
             GROUP BY bucket
         ),
+        -- Calculate cumulative total
+        cumulative AS (
+            SELECT 
+                bucket,
+                (SELECT total FROM baseline_total) + 
+                SUM(bucket_delta) OVER (ORDER BY bucket ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) as value
+            FROM bucket_changes
+        ),
+        -- Add starting point at 0
+        starting_point AS (
+            SELECT $1::TIMESTAMPTZ as bucket, 0::FLOAT8 as value
+        ),
         gapfilled AS (
-            -- Use time_bucket_gapfill for continuous time series (Grafana needs this)
             SELECT 
                 time_bucket_gapfill($3::INTERVAL, bucket, $1::TIMESTAMPTZ, $2::TIMESTAMPTZ) as gf_bucket,
-                interpolate(bucket_total) as gf_value
-            FROM bucket_totals
+                interpolate(value) as gf_value
+            FROM cumulative
+        ),
+        all_points AS (
+            SELECT bucket, value FROM starting_point
+            UNION ALL
+            SELECT 
+                COALESCE(g.gf_bucket, c.bucket) as bucket,
+                COALESCE(g.gf_value, c.value, (SELECT total FROM baseline_total)) as value
+            FROM gapfilled g
+            FULL OUTER JOIN cumulative c ON g.gf_bucket = c.bucket
+            WHERE COALESCE(g.gf_bucket, c.bucket) IS NOT NULL
         )
-        SELECT 
-            COALESCE(g.gf_bucket, bt.bucket) as bucket,
-            COALESCE(g.gf_value, bt.bucket_total, (SELECT total FROM baseline_total)) as value
-        FROM gapfilled g
-        FULL OUTER JOIN bucket_totals bt ON g.gf_bucket = bt.bucket
-        ORDER BY bucket ASC
+        SELECT bucket, value FROM all_points ORDER BY bucket ASC
         "#,
     )
     .bind(start)
@@ -292,4 +281,45 @@ async fn get_version_distribution(
     })?;
 
     Ok(Json(stats))
+}
+
+fn calculate_bucket_interval(from: &OffsetDateTime, to: &OffsetDateTime) -> i64 {
+    let duration_secs = (to.unix_timestamp() - from.unix_timestamp()).max(1);
+
+    let target_points = 150;
+    let interval_secs = duration_secs / target_points;
+
+    if interval_secs < 60 {
+        if interval_secs < 20 { 10 } else { 30 }
+    } else if interval_secs < 3600 {
+        if interval_secs < 180 {
+            60
+        } else if interval_secs < 450 {
+            300
+        } else if interval_secs < 750 {
+            600
+        } else if interval_secs < 1350 {
+            900
+        } else {
+            1800
+        }
+    } else if interval_secs < 86400 {
+        if interval_secs < 5400 {
+            3600
+        } else if interval_secs < 10800 {
+            7200
+        } else if interval_secs < 18000 {
+            10800
+        } else if interval_secs < 32400 {
+            21600
+        } else {
+            43200
+        }
+    } else {
+        if interval_secs < 432000 {
+            86400
+        } else {
+            604800
+        }
+    }
 }
