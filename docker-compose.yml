@@ -7,12 +7,12 @@ services:
     environment:
       - DATABASE_URL=postgres://postgres:postgres@postgres:5432/vleer_api
       - SCRAPE_DATABASE_URL=postgres://postgres:postgres@localhost:5432/apple_music_scrape
-      - ELASTICSEARCH_URL=http://elasticsearch:9200
+      - MANTICORE_URL=http://manticore:9308
       - RUST_LOG=info
     depends_on:
       postgres:
         condition: service_healthy
-      elasticsearch:
+      manticore:
         condition: service_healthy
     networks:
       - vleer_api-network
@@ -29,6 +29,8 @@ services:
       PGDATA: /var/lib/postgresql/data
     volumes:
       - postgres:/var/lib/postgresql/data
+    command: postgres -c shared_buffers=512MB -c max_connections=200 -c work_mem=16MB
+    shm_size: 1g
     post_start:
       - command: chown -R 1000:1000 /var/lib/postgresql/data
         user: root
@@ -43,41 +45,31 @@ services:
       retries: 5
       start_period: 10s
 
-  elasticsearch:
-    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
-    container_name: elasticsearch
+  manticore:
+    image: manticoresearch/manticore:7.0.0
+    container_name: manticore
     restart: unless-stopped
     environment:
-      - discovery.type=single-node
-      - xpack.security.enabled=false
-      - "ES_JAVA_OPTS=-Xms2g -Xmx2g"
-      - bootstrap.memory_lock=true
-      - cluster.routing.allocation.disk.watermark.high=95%
-      - cluster.routing.allocation.disk.watermark.flood_stage=97%
+      - MANTICORE_CONFIG=/etc/manticoresearch/manticore.conf
     ports:
-      - "9200:9200"
+      - "9308:9308"
+      - "9312:9312"
+      - "9313:9313"
     volumes:
-      - elasticsearch_data:/usr/share/elasticsearch/data
-    ulimits:
-      memlock:
-        soft: -1
-        hard: -1
-      nofile:
-        soft: 65536
-        hard: 65536
+      - manticore_data:/var/lib/manticore
     networks:
       vleer_api-network:
         aliases:
-          - elasticsearch
+          - manticore
     healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:9200/_cluster/health || exit 1"]
+      test: ["CMD-SHELL", "curl -f http://localhost:9308/sql -d 'mode=raw&query=SELECT 1' || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 5
 
 volumes:
   postgres:
-  elasticsearch_data:
+  manticore_data:
 
 networks:
   vleer_api-network:
