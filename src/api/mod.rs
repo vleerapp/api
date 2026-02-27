@@ -1,4 +1,4 @@
-use crate::elasticsearch::SearchClient;
+use crate::manticore::SearchClient;
 use axum::{Router, body::Body, extract::Request, routing::any};
 use sqlx::PgPool;
 use std::sync::Arc;

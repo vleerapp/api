@@ -1,7 +1,7 @@
 use axum::Router;
 use sqlx::PgPool;
 use std::sync::Arc;
-use crate::elasticsearch::SearchClient;
+use crate::manticore::SearchClient;
 
 pub mod v1;
 

@@ -1,10 +1,10 @@
 mod api;
 mod db;
-mod elasticsearch;
+mod manticore;
 mod models;
 mod rate_limit;
 
-use crate::elasticsearch::SearchClient;
+use crate::manticore::SearchClient;
 use crate::rate_limit::rate_limit;
 use axum::Router;
 use std::net::SocketAddr;
@@ -23,17 +23,17 @@ async fn main() {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    info!("Starting Vleer API...");
+    info!("starting vleer api");
 
     let pool = match db::create_pool().await {
         Ok(p) => p,
         Err(e) => {
-            error!("Failed to initialize database: {}", e);
+            error!("failed to initialize database: {}", e);
             std::process::exit(1);
         }
     };
 
-    info!("Database initialized and migrations applied.");
+    info!("database initialized and migrations applied");
 
     let scrape_db_url = std::env::var("SCRAPE_DATABASE_URL").unwrap_or_else(|_| {
         "postgres://postgres:postgres@localhost:5432/apple_music_scrape".to_string()
@@ -44,33 +44,33 @@ async fn main() {
         .await
     {
         Ok(p) => {
-            info!("Scrape database pool created");
+            info!("scrape database pool created");
             Some(p)
         }
         Err(e) => {
-            warn!("Scrape database unavailable, metadata endpoints will be disabled: {}", e);
+            warn!("scrape database unavailable, metadata endpoints will be disabled: {}", e);
             None
         }
     };
 
     let es_url =
-        std::env::var("ELASTICSEARCH_URL").unwrap_or_else(|_| "http://localhost:9200".to_string());
+        std::env::var("MANTICORE_URL").unwrap_or_else(|_| "http://localhost:9308".to_string());
     let search_client = match SearchClient::new(&es_url) {
         Ok(client) => {
-            info!("Elasticsearch client created, connecting to: {}", es_url);
+            info!("manticore client created, connecting to {}", es_url);
             let client = Arc::new(client);
             if let Err(e) = client.create_index().await {
-                error!("Failed to create Elasticsearch index: {}", e);
+                error!("failed to create manticore table: {}", e);
             } else {
                 match client.count().await {
-                    Ok(count) => info!("Elasticsearch index ready. Indexed documents: {}", count),
-                    Err(e) => info!("Elasticsearch index ready. Could not get count: {}", e),
+                    Ok(count) => info!("manticore ready, indexed documents: {}", count),
+                    Err(e) => info!("manticore ready, could not get count: {}", e),
                 }
             }
             client
         }
         Err(e) => {
-            error!("Failed to create Elasticsearch client: {}", e);
+            error!("failed to create manticore client: {}", e);
             std::process::exit(1);
         }
     };
@@ -81,7 +81,7 @@ async fn main() {
         .layer(rate_limit(20, 1000));
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
-    info!("Server listening on http://0.0.0.0:3000");
+    info!("server listening on 0.0.0.0:3000");
 
     axum::serve(
         listener,

@@ -46,6 +46,8 @@ pub enum SearchResultItem {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SearchResponse {
+    #[serde(rename = "type")]
+    pub item_type: String,
     pub data: Vec<SearchResultItem>,
     pub total: i64,
     pub limit: i32,

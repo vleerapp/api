@@ -32,7 +32,7 @@ async fn submit_telemetry(
     State(pool): State<PgPool>,
     ValidatedJson(payload): ValidatedJson<TelemetrySubmission>,
 ) -> axum::http::StatusCode {
-    debug!(user_id = %payload.user_id, "v1: Receiving telemetry");
+    debug!(user_id = %payload.user_id, "receiving telemetry");
 
     let result = sqlx::query(
         r#"
@@ -50,7 +50,7 @@ async fn submit_telemetry(
     match result {
         Ok(_) => axum::http::StatusCode::OK,
         Err(e) => {
-            error!("v1 insert error: {}", e);
+            error!("telemetry insert error: {}", e);
             axum::http::StatusCode::INTERNAL_SERVER_ERROR
         }
     }
@@ -162,7 +162,7 @@ async fn get_songs_over_time(
     .fetch_all(&pool)
     .await
     .map_err(|e| {
-        error!("songs db error: {}", e);
+            error!("songs db error: {}", e);
         axum::http::StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
@@ -234,7 +234,7 @@ async fn get_users_over_time(
     .fetch_all(&pool)
     .await
     .map_err(|e| {
-        error!("users db error: {}", e);
+            error!("users db error: {}", e);
         axum::http::StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
@@ -260,7 +260,7 @@ async fn get_os_distribution(
     .fetch_all(&pool)
     .await
     .map_err(|e| {
-        error!("os stats error: {}", e);
+            error!("os stats error: {}", e);
         axum::http::StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
@@ -286,7 +286,7 @@ async fn get_version_distribution(
     .fetch_all(&pool)
     .await
     .map_err(|e| {
-        error!("version stats error: {}", e);
+            error!("version stats error: {}", e);
         axum::http::StatusCode::INTERNAL_SERVER_ERROR
     })?;
 

@@ -10,7 +10,7 @@ use sqlx::PgPool;
 use std::sync::Arc;
 use validator::Validate;
 
-use crate::{elasticsearch::SearchClient, models::metadata::SearchResponse};
+use crate::{manticore::SearchClient, models::metadata::SearchResponse};
 
 #[derive(Clone)]
 pub struct SearchState {
@@ -89,6 +89,7 @@ async fn search_handler(
     {
         Ok(result) => {
             let response = SearchResponse {
+                item_type: params.item_type.clone().unwrap_or_else(|| "song".to_string()),
                 data: result.items,
                 total: result.total,
                 limit: params.limit,
@@ -100,7 +101,7 @@ async fn search_handler(
             )
         }
         Err(e) => {
-            tracing::error!("Search error: {}", e);
+            tracing::error!("search error: {}", e);
             let response = json!({
                 "error": "Search failed",
                 "message": e.to_string(),
@@ -130,7 +131,7 @@ async fn get_song_handler(
             Json(json!({ "error": "Song not found" })),
         ),
         Err(e) => {
-            tracing::error!("Get song error: {}", e);
+            tracing::error!("get song error: {}", e);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({ "error": "Failed to fetch song" })),
@@ -159,7 +160,7 @@ async fn get_artist_handler(
             Json(json!({ "error": "Artist not found" })),
         ),
         Err(e) => {
-            tracing::error!("Get artist error: {}", e);
+            tracing::error!("get artist error: {}", e);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({ "error": "Failed to fetch artist" })),
@@ -188,7 +189,7 @@ async fn get_album_handler(
             Json(json!({ "error": "Album not found" })),
         ),
         Err(e) => {
-            tracing::error!("Get album error: {}", e);
+            tracing::error!("get album error: {}", e);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({ "error": "Failed to fetch album" })),
@@ -196,3 +197,4 @@ async fn get_album_handler(
         }
     }
 }
+
