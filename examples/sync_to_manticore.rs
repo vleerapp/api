@@ -1,7 +1,7 @@
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use futures::TryStreamExt;
 use indicatif::{ProgressBar, ProgressStyle};
-use reqwest::Client;
+use manticoresearch::apis::{client::APIClient, configuration::Configuration};
 use serde_json::json;
 use sqlx::{PgPool, Row};
 use std::env;
@@ -21,7 +21,9 @@ async fn main() -> Result<()> {
     let scrape_db_url = env::var("SCRAPE_DATABASE_URL")?;
 
     let pool = PgPool::connect(&scrape_db_url).await?;
-    let client = Client::new();
+    let mut cfg = Configuration::new();
+    cfg.base_path = manticore_url.trim_end_matches('/').to_string();
+    let client = APIClient::new(cfg);
 
     tracing::info!("creating music table");
 
@@ -37,14 +39,12 @@ async fn main() -> Result<()> {
         )
     "#;
 
-    let resp = client
-        .post(&format!("{}/sql", manticore_url))
-        .form(&[("query", create_sql), ("mode", "raw")])
-        .send()
-        .await?;
-
-    let text = resp.text().await?;
-    tracing::info!("table creation response: {}", text);
+    let response = client
+        .utils_api()
+        .sql(create_sql, Some(true))
+        .await
+        .map_err(|e| anyhow!("manticore create table request failed: {:?}", e))?;
+    tracing::info!("table creation response: {}", serde_json::to_string(&response)?);
 
     let song_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM songs")
         .fetch_one(&pool)
@@ -61,15 +61,15 @@ async fn main() -> Result<()> {
         song_count, artist_count, album_count
     );
 
-    sync_songs(&pool, &client, &manticore_url, song_count as u64).await?;
-    sync_artists(&pool, &client, &manticore_url, artist_count as u64).await?;
-    sync_albums(&pool, &client, &manticore_url, album_count as u64).await?;
+    sync_songs(&pool, &client, song_count as u64).await?;
+    sync_artists(&pool, &client, artist_count as u64).await?;
+    sync_albums(&pool, &client, album_count as u64).await?;
 
     tracing::info!("sync complete");
     Ok(())
 }
 
-async fn sync_songs(pool: &PgPool, client: &Client, url: &str, total: u64) -> Result<()> {
+async fn sync_songs(pool: &PgPool, client: &APIClient, total: u64) -> Result<()> {
 
     let pb = ProgressBar::new(total);
     pb.set_style(
@@ -112,7 +112,7 @@ async fn sync_songs(pool: &PgPool, client: &Client, url: &str, total: u64) -> Re
         }));
 
         if batch.len() >= BATCH_SIZE {
-            if send_batch(client, url, "music", &batch).await.is_ok() {
+            if send_batch(client, "music", &batch).await.is_ok() {
                 synced += batch.len() as u64;
             }
             pb.set_position(synced);
@@ -121,7 +121,7 @@ async fn sync_songs(pool: &PgPool, client: &Client, url: &str, total: u64) -> Re
     }
 
     if !batch.is_empty() {
-        if send_batch(client, url, "music", &batch).await.is_ok() {
+        if send_batch(client, "music", &batch).await.is_ok() {
             synced += batch.len() as u64;
         }
         pb.set_position(synced);
@@ -138,7 +138,7 @@ async fn sync_songs(pool: &PgPool, client: &Client, url: &str, total: u64) -> Re
     Ok(())
 }
 
-async fn sync_artists(pool: &PgPool, client: &Client, url: &str, total: u64) -> Result<()> {
+async fn sync_artists(pool: &PgPool, client: &APIClient, total: u64) -> Result<()> {
     let pb = ProgressBar::new(total);
     pb.set_style(
         ProgressStyle::default_bar()
@@ -162,7 +162,7 @@ async fn sync_artists(pool: &PgPool, client: &Client, url: &str, total: u64) -> 
         }));
 
         if batch.len() >= BATCH_SIZE {
-            if send_batch(client, url, "music", &batch).await.is_ok() {
+            if send_batch(client, "music", &batch).await.is_ok() {
                 synced += batch.len() as u64;
             }
             pb.set_position(synced);
@@ -171,7 +171,7 @@ async fn sync_artists(pool: &PgPool, client: &Client, url: &str, total: u64) -> 
     }
 
     if !batch.is_empty() {
-        if send_batch(client, url, "music", &batch).await.is_ok() {
+        if send_batch(client, "music", &batch).await.is_ok() {
             synced += batch.len() as u64;
         }
         pb.set_position(synced);
@@ -188,7 +188,7 @@ async fn sync_artists(pool: &PgPool, client: &Client, url: &str, total: u64) -> 
     Ok(())
 }
 
-async fn sync_albums(pool: &PgPool, client: &Client, url: &str, total: u64) -> Result<()> {
+async fn sync_albums(pool: &PgPool, client: &APIClient, total: u64) -> Result<()> {
     let pb = ProgressBar::new(total);
     pb.set_style(
         ProgressStyle::default_bar()
@@ -213,7 +213,7 @@ async fn sync_albums(pool: &PgPool, client: &Client, url: &str, total: u64) -> R
         }));
 
         if batch.len() >= BATCH_SIZE {
-            if send_batch(client, url, "music", &batch).await.is_ok() {
+            if send_batch(client, "music", &batch).await.is_ok() {
                 synced += batch.len() as u64;
             }
             pb.set_position(synced);
@@ -222,7 +222,7 @@ async fn sync_albums(pool: &PgPool, client: &Client, url: &str, total: u64) -> R
     }
 
     if !batch.is_empty() {
-        if send_batch(client, url, "music", &batch).await.is_ok() {
+        if send_batch(client, "music", &batch).await.is_ok() {
             synced += batch.len() as u64;
         }
         pb.set_position(synced);
@@ -240,8 +240,7 @@ async fn sync_albums(pool: &PgPool, client: &Client, url: &str, total: u64) -> R
 }
 
 async fn send_batch(
-    client: &Client,
-    url: &str,
+    client: &APIClient,
     table: &str,
     docs: &[serde_json::Value],
 ) -> Result<()> {
@@ -265,12 +264,18 @@ async fn send_batch(
         body.push('\n');
     }
 
-    client
-        .post(&format!("{}/bulk", url))
-        .header("Content-Type", "application/x-ndjson")
-        .body(body)
-        .send()
-        .await?;
+    let response = client
+        .index_api()
+        .bulk(&body)
+        .await
+        .map_err(|e| anyhow!("manticore bulk request failed: {:?}", e))?;
+
+    if response.errors.unwrap_or(false) {
+        return Err(anyhow!(
+            "manticore bulk returned errors: {}",
+            response.error.unwrap_or_else(|| "unknown error".to_string())
+        ));
+    }
 
     Ok(())
 }

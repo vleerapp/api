@@ -1,14 +1,16 @@
-use anyhow::Result;
+use anyhow::{anyhow, Result};
+use manticoresearch::{
+    apis::{client::APIClient, configuration::Configuration},
+    models::SqlResponse,
+};
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Row};
 use std::collections::HashMap;
 
 use crate::models::metadata::{Album, Artist, SearchResultItem, Song};
 
-#[derive(Clone)]
 pub struct SearchClient {
-    client: reqwest::Client,
-    url: String,
+    client: APIClient,
     index_name: String,
 }
 
@@ -20,9 +22,11 @@ pub struct AdvancedSearchResult {
 
 impl SearchClient {
     pub fn new(manticore_url: &str) -> Result<Self> {
+        let mut cfg = Configuration::new();
+        cfg.base_path = manticore_url.trim_end_matches('/').to_string();
+
         Ok(Self {
-            client: reqwest::Client::new(),
-            url: manticore_url.to_string(),
+            client: APIClient::new(cfg),
             index_name: "music".to_string(),
         })
     }
@@ -30,13 +34,11 @@ impl SearchClient {
     async fn sql(&self, query: &str) -> Result<serde_json::Value> {
         let response = self
             .client
-            .post(&format!("{}/sql", self.url))
-            .form(&[("query", query), ("mode", "json")])
-            .send()
-            .await?
-            .json()
-            .await?;
-        Ok(response)
+            .utils_api()
+            .sql(query, Some(false))
+            .await
+            .map_err(|e| anyhow!("manticore sql request failed: {:?}", e))?;
+        sql_response_to_json(response)
     }
 
     pub async fn create_index(&self) -> Result<()> {
@@ -55,14 +57,16 @@ impl SearchClient {
 
         let response = self
             .client
-            .post(&format!("{}/sql", self.url))
-            .form(&[("query", &create_sql), ("mode", &"raw".to_string())])
-            .send()
-            .await?
-            .text()
-            .await?;
+            .utils_api()
+            .sql(&create_sql, Some(true))
+            .await
+            .map_err(|e| anyhow!("manticore create index request failed: {:?}", e))?;
 
-        tracing::info!("create table {} response: {}", self.index_name, response);
+        tracing::info!(
+            "create table {} response: {}",
+            self.index_name,
+            serde_json::to_string(&response)?
+        );
         Ok(())
     }
 
@@ -96,7 +100,6 @@ impl SearchClient {
         }
 
         if let Some(t) = item_type {
-            // Single type query — use offset/limit directly
             let sql = format!(
                 "SELECT doc_id FROM {} WHERE MATCH('{}') AND item_type='{}' LIMIT {}, {}",
                 self.index_name, match_expr, t, offset, limit
@@ -163,7 +166,6 @@ impl SearchClient {
             return Ok(AdvancedSearchResult { items, total });
         }
 
-        // No type filter — default to songs only
         let sql = format!(
             "SELECT doc_id FROM {} WHERE MATCH('{}') AND item_type='song' LIMIT {}, {}",
             self.index_name, match_expr, offset, limit
@@ -204,62 +206,14 @@ impl SearchClient {
     }
 
     pub async fn get_song_by_id(&self, pool: &PgPool, id: &str) -> Result<Option<Song>> {
-        let sql = format!(
-            "SELECT item_type FROM {} WHERE doc_id='{}'",
-            self.index_name, id
-        );
-        let response = self.sql(&sql).await?;
-        let empty_vec: Vec<serde_json::Value> = vec![];
-        let hits = response["hits"]["hits"].as_array().unwrap_or(&empty_vec);
-
-        if hits.is_empty() {
-            return Ok(None);
-        }
-
-        if hits[0]["_source"]["item_type"].as_str() != Some("song") {
-            return Ok(None);
-        }
-
         self.fetch_song_details(pool, id).await
     }
 
     pub async fn get_artist_by_id(&self, pool: &PgPool, id: &str) -> Result<Option<Artist>> {
-        let sql = format!(
-            "SELECT item_type FROM {} WHERE doc_id='{}'",
-            self.index_name, id
-        );
-        let response = self.sql(&sql).await?;
-        let empty_vec: Vec<serde_json::Value> = vec![];
-        let hits = response["hits"]["hits"].as_array().unwrap_or(&empty_vec);
-
-        if hits.is_empty() {
-            return Ok(None);
-        }
-
-        if hits[0]["_source"]["item_type"].as_str() != Some("artist") {
-            return Ok(None);
-        }
-
         self.fetch_artist_details(pool, id).await
     }
 
     pub async fn get_album_by_id(&self, pool: &PgPool, id: &str) -> Result<Option<Album>> {
-        let sql = format!(
-            "SELECT item_type FROM {} WHERE doc_id='{}'",
-            self.index_name, id
-        );
-        let response = self.sql(&sql).await?;
-        let empty_vec: Vec<serde_json::Value> = vec![];
-        let hits = response["hits"]["hits"].as_array().unwrap_or(&empty_vec);
-
-        if hits.is_empty() {
-            return Ok(None);
-        }
-
-        if hits[0]["_source"]["item_type"].as_str() != Some("album") {
-            return Ok(None);
-        }
-
         self.fetch_album_details(pool, id).await
     }
 
@@ -272,18 +226,33 @@ impl SearchClient {
             return Ok(HashMap::new());
         }
         let rows = sqlx::query(
-            r#"SELECT s.id, s.name, s.image, s.duration,
+            r#"WITH artists_agg AS (
+                    SELECT
+                        sa.song_id,
+                        string_agg(DISTINCT a.name, ', ') AS artist_names
+                    FROM song_artists sa
+                    JOIN artists a ON sa.artist_id = a.id
+                    WHERE sa.song_id = ANY($1)
+                    GROUP BY sa.song_id
+                ),
+                albums_agg AS (
+                    SELECT
+                        sal.song_id,
+                        string_agg(DISTINCT al.name, ', ') AS album_names
+                    FROM song_albums sal
+                    JOIN albums al ON sal.album_id = al.id
+                    WHERE sal.song_id = ANY($1)
+                    GROUP BY sal.song_id
+                )
+               SELECT s.id, s.name, s.image, s.duration,
                       s.disc_number, s.track_number, s.isrc, s.date,
-                      string_agg(DISTINCT a.name, ', ') as artist_names,
-                      string_agg(DISTINCT al.name, ', ') as album_names
+                      artists_agg.artist_names,
+                      albums_agg.album_names
                FROM songs s
-               LEFT JOIN song_artists sa ON s.id = sa.song_id
-               LEFT JOIN artists a ON sa.artist_id = a.id
-               LEFT JOIN song_albums sal ON s.id = sal.song_id
-               LEFT JOIN albums al ON sal.album_id = al.id
+               LEFT JOIN artists_agg ON artists_agg.song_id = s.id
+               LEFT JOIN albums_agg ON albums_agg.song_id = s.id
                WHERE s.id = ANY($1)
-               GROUP BY s.id, s.name, s.image, s.duration,
-                        s.disc_number, s.track_number, s.isrc, s.date"#,
+            "#,
         )
         .bind(ids)
         .fetch_all(pool)
@@ -291,24 +260,31 @@ impl SearchClient {
 
         let mut map = HashMap::new();
         for r in rows {
-            let artist: String = r.get::<Option<String>, _>("artist_names").unwrap_or_default();
-            let album: String = r.get::<Option<String>, _>("album_names").unwrap_or_default();
+            let artist: String = r
+                .get::<Option<String>, _>("artist_names")
+                .unwrap_or_default();
+            let album: String = r
+                .get::<Option<String>, _>("album_names")
+                .unwrap_or_default();
             if artist.is_empty() || album.is_empty() {
                 continue;
             }
             let id: String = r.get("id");
-            map.insert(id.clone(), Song {
-                id,
-                name: r.get("name"),
-                artist,
-                album,
-                image: r.get("image"),
-                disc_number: r.get::<i64, _>("disc_number") as i32,
-                track_number: r.get::<i64, _>("track_number") as i32,
-                duration: r.get::<i64, _>("duration") as i32,
-                isrc: r.get("isrc"),
-                date: r.get("date"),
-            });
+            map.insert(
+                id.clone(),
+                Song {
+                    id,
+                    name: r.get("name"),
+                    artist,
+                    album,
+                    image: r.get("image"),
+                    disc_number: r.get::<i64, _>("disc_number") as i32,
+                    track_number: r.get::<i64, _>("track_number") as i32,
+                    duration: r.get::<i64, _>("duration") as i32,
+                    isrc: r.get("isrc"),
+                    date: r.get("date"),
+                },
+            );
         }
         Ok(map)
     }
@@ -329,11 +305,14 @@ impl SearchClient {
         let mut map = HashMap::new();
         for r in rows {
             let id: String = r.get("id");
-            map.insert(id.clone(), Artist {
-                id,
-                name: r.get("name"),
-                image: r.get("image"),
-            });
+            map.insert(
+                id.clone(),
+                Artist {
+                    id,
+                    name: r.get("name"),
+                    image: r.get("image"),
+                },
+            );
         }
         Ok(map)
     }
@@ -363,39 +342,59 @@ impl SearchClient {
 
         let mut map = HashMap::new();
         for r in rows {
-            let artist_name: String = r.get::<Option<String>, _>("artist_names").unwrap_or_default();
+            let artist_name: String = r
+                .get::<Option<String>, _>("artist_names")
+                .unwrap_or_default();
             if artist_name.is_empty() {
                 continue;
             }
             let id: String = r.get("id");
-            map.insert(id.clone(), Album {
-                id,
-                name: r.get("name"),
-                artist: artist_name,
-                image: r.get("image"),
-                date: r.get::<Option<String>, _>("date").unwrap_or_default(),
-                track_count: r.get::<i64, _>("track_count") as i32,
-                upc: r.get("upc"),
-                label: r.get::<Option<String>, _>("label"),
-            });
+            map.insert(
+                id.clone(),
+                Album {
+                    id,
+                    name: r.get("name"),
+                    artist: artist_name,
+                    image: r.get("image"),
+                    date: r.get::<Option<String>, _>("date").unwrap_or_default(),
+                    track_count: r.get::<i64, _>("track_count") as i32,
+                    upc: r.get("upc"),
+                    label: r.get::<Option<String>, _>("label"),
+                },
+            );
         }
         Ok(map)
     }
 
     async fn fetch_song_details(&self, pool: &PgPool, id: &str) -> Result<Option<Song>> {
         let row = sqlx::query(
-            r#"SELECT s.id, s.name, s.image, s.duration, 
+            r#"WITH artist_agg AS (
+                    SELECT
+                        sa.song_id,
+                        string_agg(DISTINCT a.name, ', ') AS artist_names
+                    FROM song_artists sa
+                    JOIN artists a ON sa.artist_id = a.id
+                    WHERE sa.song_id = $1
+                    GROUP BY sa.song_id
+                ),
+                album_agg AS (
+                    SELECT
+                        sal.song_id,
+                        string_agg(DISTINCT al.name, ', ') AS album_names
+                    FROM song_albums sal
+                    JOIN albums al ON sal.album_id = al.id
+                    WHERE sal.song_id = $1
+                    GROUP BY sal.song_id
+                )
+               SELECT s.id, s.name, s.image, s.duration,
                       s.disc_number, s.track_number, s.isrc, s.date,
-                      string_agg(DISTINCT a.name, ', ') as artist_names,
-                      string_agg(DISTINCT al.name, ', ') as album_names
+                      artist_agg.artist_names,
+                      album_agg.album_names
                FROM songs s
-               LEFT JOIN song_artists sa ON s.id = sa.song_id
-               LEFT JOIN artists a ON sa.artist_id = a.id
-               LEFT JOIN song_albums sal ON s.id = sal.song_id
-               LEFT JOIN albums al ON sal.album_id = al.id
+               LEFT JOIN artist_agg ON artist_agg.song_id = s.id
+               LEFT JOIN album_agg ON album_agg.song_id = s.id
                WHERE s.id = $1
-               GROUP BY s.id, s.name, s.image, s.duration,
-                        s.disc_number, s.track_number, s.isrc, s.date"#,
+            "#,
         )
         .bind(id)
         .fetch_optional(pool)
@@ -403,8 +402,12 @@ impl SearchClient {
 
         match row {
             Some(r) => {
-                let artist: String = r.get::<Option<String>, _>("artist_names").unwrap_or_default();
-                let album: String = r.get::<Option<String>, _>("album_names").unwrap_or_default();
+                let artist: String = r
+                    .get::<Option<String>, _>("artist_names")
+                    .unwrap_or_default();
+                let album: String = r
+                    .get::<Option<String>, _>("album_names")
+                    .unwrap_or_default();
 
                 if artist.is_empty() || album.is_empty() {
                     return Ok(None);
@@ -461,7 +464,9 @@ impl SearchClient {
 
         match row {
             Some(r) => {
-                let artist_name: String = r.get::<Option<String>, _>("artist_names").unwrap_or_default();
+                let artist_name: String = r
+                    .get::<Option<String>, _>("artist_names")
+                    .unwrap_or_default();
 
                 if artist_name.is_empty() {
                     return Ok(None);
@@ -494,4 +499,12 @@ impl SearchClient {
 
         Ok(hits[0]["_source"]["cnt"].as_i64().unwrap_or(0))
     }
+}
+
+fn sql_response_to_json(response: SqlResponse) -> Result<serde_json::Value> {
+    let value = match response {
+        SqlResponse::SqlObjResponse(obj) => serde_json::to_value(obj)?,
+        SqlResponse::SqlRawResponse(raw) => serde_json::json!({ "hits": raw }),
+    };
+    Ok(value)
 }
