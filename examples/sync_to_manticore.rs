@@ -6,12 +6,15 @@ use serde_json::json;
 use sqlx::{PgPool, Row};
 use std::env;
 
-const BATCH_SIZE: usize = 1000;
+const BATCH_SIZE: usize = 5000;
 
 #[tokio::main]
 async fn main() -> Result<()> {
     dotenvy::dotenv().ok();
-    tracing_subscriber::fmt::init();
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .with_writer(std::io::stderr)
+        .init();
 
     let manticore_url =
         env::var("MANTICORE_URL").unwrap_or_else(|_| "http://localhost:9308".to_string());
