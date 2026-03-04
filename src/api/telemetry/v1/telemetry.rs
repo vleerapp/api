@@ -65,7 +65,6 @@ async fn get_songs_over_time(
         .unwrap_or_else(|| OffsetDateTime::now_utc() - time::Duration::days(30));
     let end = params.to.unwrap_or_else(|| OffsetDateTime::now_utc());
 
-    // Calculate interval based on time range (Grafana-friendly bucketing)
     let interval_secs = calculate_bucket_interval(&start, &end);
 
     let points = sqlx::query_as::<_, TimeSeriesPoint>(
@@ -260,7 +259,7 @@ async fn get_os_distribution(
     .fetch_all(&pool)
     .await
     .map_err(|e| {
-            error!("os stats error: {}", e);
+        error!("os stats error: {}", e);
         axum::http::StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
@@ -286,7 +285,7 @@ async fn get_version_distribution(
     .fetch_all(&pool)
     .await
     .map_err(|e| {
-            error!("version stats error: {}", e);
+        error!("version stats error: {}", e);
         axum::http::StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
