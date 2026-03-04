@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Result};
 use futures::TryStreamExt;
 use indicatif::{ProgressBar, ProgressStyle};
-use manticoresearch::apis::{client::APIClient, configuration::Configuration};
+use reqwest::Client;
 use serde_json::json;
 use sqlx::{PgPool, Row};
 use std::env;
@@ -21,14 +21,14 @@ async fn main() -> Result<()> {
     let scrape_db_url = env::var("SCRAPE_DATABASE_URL")?;
 
     let pool = PgPool::connect(&scrape_db_url).await?;
-    let mut cfg = Configuration::new();
-    cfg.base_path = manticore_url.trim_end_matches('/').to_string();
-    let client = APIClient::new(cfg);
+    let http = Client::new();
+    let base = manticore_url.trim_end_matches('/').to_string();
 
     tracing::info!("creating music table");
-
-    let create_sql = r#"
-        CREATE TABLE IF NOT EXISTS music (
+    sql_ddl(
+        &http,
+        &base,
+        r#"CREATE TABLE IF NOT EXISTS music (
             doc_id string,
             name text,
             artist_name text,
@@ -36,15 +36,12 @@ async fn main() -> Result<()> {
             item_type string,
             duration int,
             date string
-        )
-    "#;
+        )"#,
+    )
+    .await?;
 
-    let response = client
-        .utils_api()
-        .sql(create_sql, Some(true))
-        .await
-        .map_err(|e| anyhow!("manticore create table request failed: {:?}", e))?;
-    tracing::info!("table creation response: {}", serde_json::to_string(&response)?);
+    tracing::info!("truncating music table to prevent duplicates");
+    sql_ddl(&http, &base, "TRUNCATE TABLE music").await?;
 
     let song_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM songs")
         .fetch_one(&pool)
@@ -58,19 +55,20 @@ async fn main() -> Result<()> {
 
     tracing::info!(
         "total to sync: {} songs, {} artists, {} albums",
-        song_count, artist_count, album_count
+        song_count,
+        artist_count,
+        album_count
     );
 
-    sync_songs(&pool, &client, song_count as u64).await?;
-    sync_artists(&pool, &client, artist_count as u64).await?;
-    sync_albums(&pool, &client, album_count as u64).await?;
+    sync_songs(&pool, &http, &base, song_count as u64).await?;
+    sync_artists(&pool, &http, &base, artist_count as u64).await?;
+    sync_albums(&pool, &http, &base, album_count as u64).await?;
 
     tracing::info!("sync complete");
     Ok(())
 }
 
-async fn sync_songs(pool: &PgPool, client: &APIClient, total: u64) -> Result<()> {
-
+async fn sync_songs(pool: &PgPool, http: &Client, base: &str, total: u64) -> Result<()> {
     let pb = ProgressBar::new(total);
     pb.set_style(
         ProgressStyle::default_bar()
@@ -112,18 +110,16 @@ async fn sync_songs(pool: &PgPool, client: &APIClient, total: u64) -> Result<()>
         }));
 
         if batch.len() >= BATCH_SIZE {
-            if send_batch(client, "music", &batch).await.is_ok() {
-                synced += batch.len() as u64;
-            }
+            send_batch(http, base, "music", &batch).await?;
+            synced += batch.len() as u64;
             pb.set_position(synced);
             batch.clear();
         }
     }
 
     if !batch.is_empty() {
-        if send_batch(client, "music", &batch).await.is_ok() {
-            synced += batch.len() as u64;
-        }
+        send_batch(http, base, "music", &batch).await?;
+        synced += batch.len() as u64;
         pb.set_position(synced);
     }
 
@@ -138,11 +134,13 @@ async fn sync_songs(pool: &PgPool, client: &APIClient, total: u64) -> Result<()>
     Ok(())
 }
 
-async fn sync_artists(pool: &PgPool, client: &APIClient, total: u64) -> Result<()> {
+async fn sync_artists(pool: &PgPool, http: &Client, base: &str, total: u64) -> Result<()> {
     let pb = ProgressBar::new(total);
     pb.set_style(
         ProgressStyle::default_bar()
-            .template("artists {spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} ({percent}%) {eta}")?
+            .template(
+                "artists {spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} ({percent}%) {eta}",
+            )?
             .progress_chars("=>-"),
     );
 
@@ -162,18 +160,16 @@ async fn sync_artists(pool: &PgPool, client: &APIClient, total: u64) -> Result<(
         }));
 
         if batch.len() >= BATCH_SIZE {
-            if send_batch(client, "music", &batch).await.is_ok() {
-                synced += batch.len() as u64;
-            }
+            send_batch(http, base, "music", &batch).await?;
+            synced += batch.len() as u64;
             pb.set_position(synced);
             batch.clear();
         }
     }
 
     if !batch.is_empty() {
-        if send_batch(client, "music", &batch).await.is_ok() {
-            synced += batch.len() as u64;
-        }
+        send_batch(http, base, "music", &batch).await?;
+        synced += batch.len() as u64;
         pb.set_position(synced);
     }
 
@@ -188,11 +184,13 @@ async fn sync_artists(pool: &PgPool, client: &APIClient, total: u64) -> Result<(
     Ok(())
 }
 
-async fn sync_albums(pool: &PgPool, client: &APIClient, total: u64) -> Result<()> {
+async fn sync_albums(pool: &PgPool, http: &Client, base: &str, total: u64) -> Result<()> {
     let pb = ProgressBar::new(total);
     pb.set_style(
         ProgressStyle::default_bar()
-            .template("albums  {spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} ({percent}%) {eta}")?
+            .template(
+                "albums  {spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} ({percent}%) {eta}",
+            )?
             .progress_chars("=>-"),
     );
 
@@ -213,18 +211,16 @@ async fn sync_albums(pool: &PgPool, client: &APIClient, total: u64) -> Result<()
         }));
 
         if batch.len() >= BATCH_SIZE {
-            if send_batch(client, "music", &batch).await.is_ok() {
-                synced += batch.len() as u64;
-            }
+            send_batch(http, base, "music", &batch).await?;
+            synced += batch.len() as u64;
             pb.set_position(synced);
             batch.clear();
         }
     }
 
     if !batch.is_empty() {
-        if send_batch(client, "music", &batch).await.is_ok() {
-            synced += batch.len() as u64;
-        }
+        send_batch(http, base, "music", &batch).await?;
+        synced += batch.len() as u64;
         pb.set_position(synced);
     }
 
@@ -239,14 +235,10 @@ async fn sync_albums(pool: &PgPool, client: &APIClient, total: u64) -> Result<()
     Ok(())
 }
 
-async fn send_batch(
-    client: &APIClient,
-    table: &str,
-    docs: &[serde_json::Value],
-) -> Result<()> {
+async fn send_batch(http: &Client, base: &str, table: &str, docs: &[serde_json::Value]) -> Result<()> {
     let mut body = String::new();
     for doc in docs {
-        let line = serde_json::json!({
+        let line = json!({
             "insert": {
                 "table": table,
                 "doc": {
@@ -264,17 +256,59 @@ async fn send_batch(
         body.push('\n');
     }
 
-    let response = client
-        .index_api()
-        .bulk(&body)
+    let resp = http
+        .post(format!("{base}/bulk"))
+        .header("Content-Type", "application/x-ndjson")
+        .body(body)
+        .send()
         .await
-        .map_err(|e| anyhow!("manticore bulk request failed: {:?}", e))?;
+        .map_err(|e| anyhow!("manticore bulk request failed: {e}"))?;
 
-    if response.errors.unwrap_or(false) {
-        return Err(anyhow!(
-            "manticore bulk returned errors: {}",
-            response.error.unwrap_or_else(|| "unknown error".to_string())
-        ));
+    let status = resp.status();
+    let text = resp
+        .text()
+        .await
+        .map_err(|e| anyhow!("failed to read bulk response: {e}"))?;
+
+    if !status.is_success() {
+        return Err(anyhow!("manticore bulk error {status}: {text}"));
+    }
+
+    let parsed: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|e| anyhow!("failed to parse bulk response: {e}, body: {text}"))?;
+
+    if parsed["errors"].as_bool().unwrap_or(false) {
+        return Err(anyhow!("manticore bulk returned errors: {text}"));
+    }
+
+    Ok(())
+}
+
+async fn sql_ddl(http: &Client, base: &str, query: &str) -> Result<()> {
+    let resp = http
+        .post(format!("{base}/sql?mode=raw"))
+        .form(&[("query", query)])
+        .send()
+        .await
+        .map_err(|e| anyhow!("manticore request failed: {e}"))?;
+
+    let status = resp.status();
+    let body = resp
+        .text()
+        .await
+        .map_err(|e| anyhow!("failed to read response: {e}"))?;
+
+    if !status.is_success() {
+        return Err(anyhow!("manticore DDL error {status}: {body}"));
+    }
+
+    let parsed: serde_json::Value = serde_json::from_str(&body)
+        .map_err(|e| anyhow!("failed to parse response: {e}, body: {body}"))?;
+
+    if let Some(err) = parsed[0]["error"].as_str() {
+        if !err.is_empty() {
+            return Err(anyhow!("manticore sql error: {err}"));
+        }
     }
 
     Ok(())
