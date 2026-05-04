@@ -56,14 +56,34 @@ async fn submit_telemetry(
     }
 }
 
+async fn resolve_time_range(
+    pool: &PgPool,
+    from: Option<OffsetDateTime>,
+    to: Option<OffsetDateTime>,
+) -> Result<(OffsetDateTime, OffsetDateTime), axum::http::StatusCode> {
+    let end = to.unwrap_or_else(|| OffsetDateTime::now_utc());
+    let start = match from {
+        Some(t) => t,
+        None => {
+            let min: Option<OffsetDateTime> =
+                sqlx::query_scalar("SELECT MIN(time) FROM telemetry")
+                    .fetch_one(pool)
+                    .await
+                    .map_err(|e| {
+                        error!("min time query error: {}", e);
+                        axum::http::StatusCode::INTERNAL_SERVER_ERROR
+                    })?;
+            min.unwrap_or(end)
+        }
+    };
+    Ok((start, end))
+}
+
 async fn get_songs_over_time(
     State(pool): State<PgPool>,
     Query(params): Query<StatsQuery>,
 ) -> Result<Json<Vec<TimeSeriesPoint>>, axum::http::StatusCode> {
-    let start = params
-        .from
-        .unwrap_or_else(|| OffsetDateTime::now_utc() - time::Duration::days(30));
-    let end = params.to.unwrap_or_else(|| OffsetDateTime::now_utc());
+    let (start, end) = resolve_time_range(&pool, params.from, params.to).await?;
 
     let interval_secs = calculate_bucket_interval(&start, &end);
 
@@ -172,10 +192,7 @@ async fn get_users_over_time(
     State(pool): State<PgPool>,
     Query(params): Query<StatsQuery>,
 ) -> Result<Json<Vec<TimeSeriesPoint>>, axum::http::StatusCode> {
-    let start = params
-        .from
-        .unwrap_or_else(|| OffsetDateTime::now_utc() - time::Duration::days(30));
-    let end = params.to.unwrap_or_else(|| OffsetDateTime::now_utc());
+    let (start, end) = resolve_time_range(&pool, params.from, params.to).await?;
 
     let interval_secs = calculate_bucket_interval(&start, &end);
 
