@@ -142,20 +142,14 @@ async fn get_songs_over_time(
                 SUM(bucket_delta) OVER (ORDER BY bucket ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) as value
             FROM bucket_changes
         ),
-        -- Add starting point at 0
-        starting_point AS (
-            SELECT $1::TIMESTAMPTZ as bucket, 0::FLOAT8 as value
-        ),
         gapfilled AS (
-            SELECT 
+            SELECT
                 time_bucket_gapfill($3::INTERVAL, bucket, $1::TIMESTAMPTZ, $2::TIMESTAMPTZ) as gf_bucket,
                 interpolate(value) as gf_value
             FROM cumulative
         ),
         all_points AS (
-            SELECT bucket, value FROM starting_point
-            UNION ALL
-            SELECT 
+            SELECT
                 COALESCE(g.gf_bucket, c.bucket) as bucket,
                 COALESCE(g.gf_value, c.value, (SELECT total FROM baseline_total)) as value
             FROM gapfilled g
