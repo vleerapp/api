@@ -20,8 +20,13 @@ pub struct AdvancedSearchResult {
 
 impl SearchClient {
     pub fn new(manticore_url: &str) -> Result<Self> {
+        let http = Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .connect_timeout(std::time::Duration::from_secs(5))
+            .build()
+            .map_err(|e| anyhow!("failed to build http client: {e}"))?;
         Ok(Self {
-            http: Client::new(),
+            http,
             url: manticore_url.trim_end_matches('/').to_string(),
             index_name: "music".to_string(),
         })
@@ -91,13 +96,35 @@ impl SearchClient {
                 item_type string,
                 duration int,
                 date string
-            )"#,
+            ) min_prefix_len='3'"#,
             self.index_name
         );
 
         let response = self.sql_raw(&create_sql).await?;
         tracing::info!("create table {} response: {}", self.index_name, response);
         Ok(())
+    }
+
+    fn result_name(item: &SearchResultItem) -> &str {
+        match item {
+            SearchResultItem::Song(s) => &s.name,
+            SearchResultItem::Artist(a) => &a.name,
+            SearchResultItem::Album(a) => &a.name,
+        }
+    }
+
+    fn rank_relevance(name: &str, query: &str) -> u8 {
+        let name_lc = name.to_lowercase();
+        let query_lc = query.to_lowercase();
+        if name == query {
+            0
+        } else if name_lc == query_lc {
+            1
+        } else if name_lc.starts_with(&query_lc) {
+            2
+        } else {
+            3
+        }
     }
 
     pub async fn search_advanced(
@@ -121,7 +148,12 @@ impl SearchClient {
                 .replace('^', " ")
         };
 
-        let mut match_expr = clean(query);
+        let cleaned_query = clean(query);
+        let mut match_expr = if cleaned_query.ends_with('*') {
+            cleaned_query
+        } else {
+            format!("{}*", cleaned_query)
+        };
         if let Some(a) = artist_filter {
             match_expr.push_str(&format!(" @artist_name {}", clean(a)));
         }
@@ -134,20 +166,14 @@ impl SearchClient {
                 "SELECT doc_id FROM {} WHERE MATCH('{}') AND item_type='{}' LIMIT {}, {}",
                 self.index_name, match_expr, t, offset, limit
             );
-            let total_sql = format!(
-                "SELECT COUNT(*) as cnt FROM {} WHERE MATCH('{}') AND item_type='{}'",
-                self.index_name, match_expr, t
-            );
 
-            let (response, total_response) =
-                tokio::try_join!(self.sql(&sql), self.sql(&total_sql))?;
+            let response = self.sql(&sql).await?;
 
             let empty_vec: Vec<serde_json::Value> = vec![];
             let hits = response["hits"]["hits"].as_array().unwrap_or(&empty_vec);
-            let total = total_response["hits"]["hits"]
-                .get(0)
-                .and_then(|h| h["_source"]["cnt"].as_i64())
-                .unwrap_or(0);
+            let total = response["hits"]["total"].as_i64()
+                .or_else(|| response["hits"]["total"]["value"].as_i64())
+                .unwrap_or(hits.len() as i64);
 
             let ids: Vec<String> = {
                 let mut seen = std::collections::HashSet::new();
@@ -196,6 +222,7 @@ impl SearchClient {
                 _ => {}
             }
 
+            items.sort_by_key(|item| Self::rank_relevance(Self::result_name(item), query));
             return Ok(AdvancedSearchResult { items, total });
         }
 
@@ -203,19 +230,14 @@ impl SearchClient {
             "SELECT doc_id FROM {} WHERE MATCH('{}') AND item_type='song' LIMIT {}, {}",
             self.index_name, match_expr, offset, limit
         );
-        let total_sql = format!(
-            "SELECT COUNT(*) as cnt FROM {} WHERE MATCH('{}') AND item_type='song'",
-            self.index_name, match_expr
-        );
 
-        let (response, total_response) = tokio::try_join!(self.sql(&sql), self.sql(&total_sql))?;
+        let response = self.sql(&sql).await?;
 
         let empty_vec: Vec<serde_json::Value> = vec![];
         let hits = response["hits"]["hits"].as_array().unwrap_or(&empty_vec);
-        let total = total_response["hits"]["hits"]
-            .get(0)
-            .and_then(|h| h["_source"]["cnt"].as_i64())
-            .unwrap_or(0);
+        let total = response["hits"]["total"].as_i64()
+            .or_else(|| response["hits"]["total"]["value"].as_i64())
+            .unwrap_or(hits.len() as i64);
 
         let ids: Vec<String> = {
             let mut seen = std::collections::HashSet::new();
@@ -238,6 +260,7 @@ impl SearchClient {
             }
         }
 
+        items.sort_by_key(|item| Self::rank_relevance(Self::result_name(item), query));
         Ok(AdvancedSearchResult { items, total })
     }
 

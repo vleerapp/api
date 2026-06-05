@@ -36,7 +36,7 @@ async fn main() -> Result<()> {
             item_type string,
             duration int,
             date string
-        )"#,
+        ) min_prefix_len='3'"#,
     )
     .await?;
 
