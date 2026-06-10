@@ -89,7 +89,10 @@ async fn search_handler(
     {
         Ok(result) => {
             let response = SearchResponse {
-                item_type: params.item_type.clone().unwrap_or_else(|| "song".to_string()),
+                item_type: params
+                    .item_type
+                    .clone()
+                    .unwrap_or_else(|| "song".to_string()),
                 data: result.items,
                 total: result.total,
                 limit: params.limit,
@@ -196,4 +199,3 @@ async fn get_album_handler(
         }
     }
 }
-

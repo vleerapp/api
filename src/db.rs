@@ -20,9 +20,11 @@ pub async fn create_pool() -> Result<PgPool, sqlx::Error> {
 
     if !exists {
         let escaped = db_name.replace('"', "\"\"");
-        sqlx::query(sqlx::AssertSqlSafe(format!("CREATE DATABASE \"{escaped}\"")))
-            .execute(&admin)
-            .await?;
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "CREATE DATABASE \"{escaped}\""
+        )))
+        .execute(&admin)
+        .await?;
     }
 
     admin.close().await;

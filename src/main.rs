@@ -48,7 +48,10 @@ async fn main() {
             Some(p)
         }
         Err(e) => {
-            warn!("scrape database unavailable, metadata endpoints will be disabled: {}", e);
+            warn!(
+                "scrape database unavailable, metadata endpoints will be disabled: {}",
+                e
+            );
             None
         }
     };

@@ -4,8 +4,9 @@ use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Row};
 use std::collections::HashMap;
 
-use crate::models::metadata::{Album, AlbumRef, Artist, ArtistRef, SearchResultItem, Song, SongSummary};
-
+use crate::models::metadata::{
+    Album, AlbumRef, Artist, ArtistRef, SearchResultItem, Song, SongSummary,
+};
 
 pub struct SearchClient {
     http: Client,
@@ -188,7 +189,8 @@ impl SearchClient {
 
         let empty_vec: Vec<serde_json::Value> = vec![];
         let hits = response["hits"]["hits"].as_array().unwrap_or(&empty_vec);
-        let total = response["hits"]["total"].as_i64()
+        let total = response["hits"]["total"]
+            .as_i64()
             .or_else(|| response["hits"]["total"]["value"].as_i64())
             .unwrap_or(hits.len() as i64);
 

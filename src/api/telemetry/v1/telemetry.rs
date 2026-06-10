@@ -65,14 +65,13 @@ async fn resolve_time_range(
     let start = match from {
         Some(t) => t,
         None => {
-            let min: Option<OffsetDateTime> =
-                sqlx::query_scalar("SELECT MIN(time) FROM telemetry")
-                    .fetch_one(pool)
-                    .await
-                    .map_err(|e| {
-                        error!("min time query error: {}", e);
-                        axum::http::StatusCode::INTERNAL_SERVER_ERROR
-                    })?;
+            let min: Option<OffsetDateTime> = sqlx::query_scalar("SELECT MIN(time) FROM telemetry")
+                .fetch_one(pool)
+                .await
+                .map_err(|e| {
+                    error!("min time query error: {}", e);
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR
+                })?;
             min.unwrap_or(end)
         }
     };

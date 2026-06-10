@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use futures::TryStreamExt;
 use indicatif::{ProgressBar, ProgressStyle};
 use reqwest::Client;
@@ -235,7 +235,12 @@ async fn sync_albums(pool: &PgPool, http: &Client, base: &str, total: u64) -> Re
     Ok(())
 }
 
-async fn send_batch(http: &Client, base: &str, table: &str, docs: &[serde_json::Value]) -> Result<()> {
+async fn send_batch(
+    http: &Client,
+    base: &str,
+    table: &str,
+    docs: &[serde_json::Value],
+) -> Result<()> {
     let mut body = String::new();
     for doc in docs {
         let line = json!({
