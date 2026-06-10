@@ -7,12 +7,12 @@ services:
     environment:
       - DATABASE_URL=postgres://postgres:postgres@postgres:5432/vleer_api
       - SCRAPE_DATABASE_URL=postgres://postgres:postgres@localhost:5432/apple_music_scrape
-      - MANTICORE_URL=http://manticore:9308
-      - RUST_LOG=info
+      - TYPESENSE_URL=http://typesense:8108
+      - TYPESENSE_API_KEY=vleer
     depends_on:
       postgres:
         condition: service_healthy
-      manticore:
+      typesense:
         condition: service_healthy
     networks:
       - vleer_api-network
@@ -45,31 +45,30 @@ services:
       retries: 5
       start_period: 10s
 
-  manticore:
-    image: manticoresearch/manticore:7.0.0
-    container_name: manticore
+  typesense:
+    image: typesense/typesense:30.1
+    container_name: typesense
     restart: unless-stopped
     environment:
-      - MANTICORE_CONFIG=/etc/manticoresearch/manticore.conf
+      - TYPESENSE_DATA_DIR=/data
+      - TYPESENSE_API_KEY=vleer
     ports:
-      - "9308:9308"
-      - "9312:9312"
-      - "9313:9313"
+      - "8108:8108"
     volumes:
-      - manticore_data:/var/lib/manticore
+      - typesense_data:/data
     networks:
       vleer_api-network:
         aliases:
-          - manticore
+          - typesense
     healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:9308/sql -d 'mode=raw&query=SELECT 1' || exit 1"]
-      interval: 30s
-      timeout: 10s
+      test: ["CMD-SHELL", "curl -f http://localhost:8108/health || exit 1"]
+      interval: 10s
+      timeout: 5s
       retries: 5
 
 volumes:
   postgres:
-  manticore_data:
+  typesense_data:
 
 networks:
   vleer_api-network:

@@ -1,11 +1,11 @@
 mod api;
 mod db;
-mod manticore;
 mod models;
 mod rate_limit;
+mod typesense;
 
-use crate::manticore::SearchClient;
 use crate::rate_limit::rate_limit;
+use crate::typesense::SearchClient;
 use axum::Router;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -56,24 +56,25 @@ async fn main() {
         }
     };
 
-    let es_url =
-        std::env::var("MANTICORE_URL").unwrap_or_else(|_| "http://localhost:9308".to_string());
-    let search_client = match SearchClient::new(&es_url) {
+    let typesense_url =
+        std::env::var("TYPESENSE_URL").unwrap_or_else(|_| "http://localhost:8108".to_string());
+    let typesense_key = std::env::var("TYPESENSE_API_KEY").unwrap_or_else(|_| "vleer".to_string());
+    let search_client = match SearchClient::new(&typesense_url, &typesense_key) {
         Ok(client) => {
-            info!("manticore client created, connecting to {}", es_url);
+            info!("typesense client created, connecting to {}", typesense_url);
             let client = Arc::new(client);
-            if let Err(e) = client.create_index().await {
-                error!("failed to create manticore table: {}", e);
+            if let Err(e) = client.create_collection().await {
+                error!("failed to create typesense collection: {}", e);
             } else {
                 match client.count().await {
-                    Ok(count) => info!("manticore ready, indexed documents: {}", count),
-                    Err(e) => info!("manticore ready, could not get count: {}", e),
+                    Ok(count) => info!("typesense ready, indexed documents: {}", count),
+                    Err(e) => info!("typesense ready, could not get count: {}", e),
                 }
             }
             client
         }
         Err(e) => {
-            error!("failed to create manticore client: {}", e);
+            error!("failed to create typesense client: {}", e);
             std::process::exit(1);
         }
     };

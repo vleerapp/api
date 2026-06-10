@@ -10,7 +10,7 @@ use sqlx::PgPool;
 use std::sync::Arc;
 use validator::Validate;
 
-use crate::{manticore::SearchClient, models::metadata::SearchResponse};
+use crate::{models::metadata::SearchResponse, typesense::SearchClient};
 
 #[derive(Clone)]
 pub struct SearchState {

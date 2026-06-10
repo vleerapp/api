@@ -11,7 +11,8 @@ use crate::models::metadata::{
 pub struct SearchClient {
     http: Client,
     url: String,
-    index_name: String,
+    api_key: String,
+    collection: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -21,7 +22,7 @@ pub struct AdvancedSearchResult {
 }
 
 impl SearchClient {
-    pub fn new(manticore_url: &str) -> Result<Self> {
+    pub fn new(typesense_url: &str, api_key: &str) -> Result<Self> {
         let http = Client::builder()
             .timeout(std::time::Duration::from_secs(10))
             .connect_timeout(std::time::Duration::from_secs(5))
@@ -29,105 +30,64 @@ impl SearchClient {
             .map_err(|e| anyhow!("failed to build http client: {e}"))?;
         Ok(Self {
             http,
-            url: manticore_url.trim_end_matches('/').to_string(),
-            index_name: "music".to_string(),
+            url: typesense_url.trim_end_matches('/').to_string(),
+            api_key: api_key.to_string(),
+            collection: "music".to_string(),
         })
     }
 
-    async fn sql(&self, query: &str) -> Result<serde_json::Value> {
+    pub async fn create_collection(&self) -> Result<()> {
+        let schema = serde_json::json!({
+            "name": self.collection,
+            "fields": [
+                {"name": "name",        "type": "string"},
+                {"name": "artist_name", "type": "string", "optional": true},
+                {"name": "album_name",  "type": "string", "optional": true},
+                {"name": "item_type",   "type": "string", "facet": true},
+                {"name": "duration",    "type": "int32",  "optional": true},
+                {"name": "date",        "type": "string", "optional": true}
+            ]
+        });
+
         let resp = self
             .http
-            .post(format!("{}/sql", self.url))
-            .form(&[("query", query)])
+            .post(format!("{}/collections", self.url))
+            .header("X-TYPESENSE-API-KEY", &self.api_key)
+            .json(&schema)
             .send()
             .await
-            .map_err(|e| anyhow!("manticore request failed: {e}"))?;
+            .map_err(|e| anyhow!("typesense request failed: {e}"))?;
 
         let status = resp.status();
-        let body = resp
-            .text()
-            .await
-            .map_err(|e| anyhow!("failed to read manticore response: {e}"))?;
 
-        if !status.is_success() {
-            return Err(anyhow!("manticore error {status}: {body}"));
+        if !status.is_success() && status.as_u16() != 409 {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(anyhow!("typesense error {status}: {body}"));
         }
 
-        serde_json::from_str(&body)
-            .map_err(|e| anyhow!("failed to parse manticore response: {e}, body: {body}"))
-    }
-
-    async fn sql_raw(&self, query: &str) -> Result<serde_json::Value> {
-        let resp = self
-            .http
-            .post(format!("{}/sql?mode=raw", self.url))
-            .form(&[("query", query)])
-            .send()
-            .await
-            .map_err(|e| anyhow!("manticore request failed: {e}"))?;
-
-        let status = resp.status();
-        let body = resp
-            .text()
-            .await
-            .map_err(|e| anyhow!("failed to read manticore response: {e}"))?;
-
-        if !status.is_success() {
-            return Err(anyhow!("manticore error {status}: {body}"));
-        }
-
-        let parsed: serde_json::Value = serde_json::from_str(&body)
-            .map_err(|e| anyhow!("failed to parse manticore response: {e}, body: {body}"))?;
-
-        if let Some(err) = parsed[0]["error"].as_str() {
-            if !err.is_empty() {
-                return Err(anyhow!("manticore sql error: {err}"));
-            }
-        }
-
-        Ok(parsed)
-    }
-
-    async fn search_json(&self, body: serde_json::Value) -> Result<serde_json::Value> {
-        let resp = self
-            .http
-            .post(format!("{}/search", self.url))
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| anyhow!("manticore request failed: {e}"))?;
-
-        let status = resp.status();
-        let text = resp
-            .text()
-            .await
-            .map_err(|e| anyhow!("failed to read manticore response: {e}"))?;
-
-        if !status.is_success() {
-            return Err(anyhow!("manticore error {status}: {text}"));
-        }
-
-        serde_json::from_str(&text)
-            .map_err(|e| anyhow!("failed to parse manticore response: {e}, body: {text}"))
-    }
-
-    pub async fn create_index(&self) -> Result<()> {
-        let create_sql = format!(
-            r#"CREATE TABLE IF NOT EXISTS {} (
-                doc_id string,
-                name text,
-                artist_name text,
-                album_name text,
-                item_type string,
-                duration int,
-                date string
-            ) min_prefix_len='3'"#,
-            self.index_name
-        );
-
-        let response = self.sql_raw(&create_sql).await?;
-        tracing::info!("create table {} response: {}", self.index_name, response);
         Ok(())
+    }
+
+    pub async fn count(&self) -> Result<i64> {
+        let resp = self
+            .http
+            .get(format!("{}/collections/{}", self.url, self.collection))
+            .header("X-TYPESENSE-API-KEY", &self.api_key)
+            .send()
+            .await
+            .map_err(|e| anyhow!("typesense request failed: {e}"))?;
+
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+
+        if !status.is_success() {
+            return Err(anyhow!("typesense error {status}: {body}"));
+        }
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&body).map_err(|e| anyhow!("failed to parse response: {e}"))?;
+
+        Ok(parsed["num_documents"].as_i64().unwrap_or(0))
     }
 
     fn result_name(item: &SearchResultItem) -> &str {
@@ -166,38 +126,63 @@ impl SearchClient {
     ) -> Result<AdvancedSearchResult> {
         let t = item_type.unwrap_or("song");
 
-        let mut must: Vec<serde_json::Value> = vec![
-            serde_json::json!({ "match": { "*": query } }),
-            serde_json::json!({ "equals": { "item_type": t } }),
-        ];
+        let mut filter = format!("item_type:={}", t);
         if let Some(a) = artist_filter {
-            must.push(serde_json::json!({ "match": { "artist_name": a } }));
+            filter.push_str(&format!(" && artist_name:=[{}]", a));
         }
         if let Some(a) = album_filter {
-            must.push(serde_json::json!({ "match": { "album_name": a } }));
+            filter.push_str(&format!(" && album_name:=[{}]", a));
         }
 
-        let body = serde_json::json!({
-            "index": self.index_name,
-            "query": { "bool": { "must": must } },
-            "source": ["doc_id"],
-            "limit": limit,
-            "offset": offset,
-        });
+        let page = (offset / limit.max(1)) + 1;
 
-        let response = self.search_json(body).await?;
+        let url = reqwest::Url::parse_with_params(
+            &format!(
+                "{}/collections/{}/documents/search",
+                self.url, self.collection
+            ),
+            &[
+                ("q", query),
+                ("query_by", "name,artist_name,album_name"),
+                ("query_by_weights", "3,2,1"),
+                ("filter_by", &filter),
+                ("num_typos", "2"),
+                ("prefix", "true"),
+                ("per_page", &limit.to_string()),
+                ("page", &page.to_string()),
+            ],
+        )
+        .map_err(|e| anyhow!("failed to build typesense url: {e}"))?;
+
+        let resp = self
+            .http
+            .get(url)
+            .header("X-TYPESENSE-API-KEY", &self.api_key)
+            .send()
+            .await
+            .map_err(|e| anyhow!("typesense request failed: {e}"))?;
+
+        let status = resp.status();
+        let text = resp
+            .text()
+            .await
+            .map_err(|e| anyhow!("failed to read typesense response: {e}"))?;
+
+        if !status.is_success() {
+            return Err(anyhow!("typesense error {status}: {text}"));
+        }
+
+        let response: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|e| anyhow!("failed to parse typesense response: {e}, body: {text}"))?;
 
         let empty_vec: Vec<serde_json::Value> = vec![];
-        let hits = response["hits"]["hits"].as_array().unwrap_or(&empty_vec);
-        let total = response["hits"]["total"]
-            .as_i64()
-            .or_else(|| response["hits"]["total"]["value"].as_i64())
-            .unwrap_or(hits.len() as i64);
+        let hits = response["hits"].as_array().unwrap_or(&empty_vec);
+        let total = response["found"].as_i64().unwrap_or(hits.len() as i64);
 
         let ids: Vec<String> = {
             let mut seen = std::collections::HashSet::new();
             hits.iter()
-                .filter_map(|h| h["_source"]["doc_id"].as_str().map(|s| s.to_string()))
+                .filter_map(|h| h["document"]["id"].as_str().map(|s| s.to_string()))
                 .filter(|id| seen.insert(id.clone()))
                 .collect()
         };
@@ -684,18 +669,5 @@ impl SearchClient {
             }
             None => Ok(None),
         }
-    }
-
-    pub async fn count(&self) -> Result<i64> {
-        let sql = format!("SELECT COUNT(*) as cnt FROM {}", self.index_name);
-        let response = self.sql(&sql).await?;
-        let empty_vec: Vec<serde_json::Value> = vec![];
-        let hits = response["hits"]["hits"].as_array().unwrap_or(&empty_vec);
-
-        if hits.is_empty() {
-            return Ok(0);
-        }
-
-        Ok(hits[0]["_source"]["cnt"].as_i64().unwrap_or(0))
     }
 }

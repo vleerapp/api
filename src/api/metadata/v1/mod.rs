@@ -1,6 +1,6 @@
 pub mod metadata;
 
-use crate::{api::metadata::v1::metadata::SearchState, manticore::SearchClient};
+use crate::{api::metadata::v1::metadata::SearchState, typesense::SearchClient};
 use axum::Router;
 use sqlx::PgPool;
 use std::sync::Arc;
