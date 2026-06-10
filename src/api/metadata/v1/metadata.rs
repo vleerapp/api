@@ -102,11 +102,10 @@ async fn search_handler(
         }
         Err(e) => {
             tracing::error!("search error: {}", e);
-            let response = json!({
-                "error": "Search failed",
-                "message": e.to_string(),
-            });
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(response))
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "Search failed" })),
+            )
         }
     }
 }

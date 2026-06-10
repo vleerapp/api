@@ -6,6 +6,7 @@ use std::collections::HashMap;
 
 use crate::models::metadata::{Album, AlbumRef, Artist, ArtistRef, SearchResultItem, Song, SongSummary};
 
+
 pub struct SearchClient {
     http: Client,
     url: String,
@@ -86,6 +87,29 @@ impl SearchClient {
         Ok(parsed)
     }
 
+    async fn search_json(&self, body: serde_json::Value) -> Result<serde_json::Value> {
+        let resp = self
+            .http
+            .post(format!("{}/search", self.url))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| anyhow!("manticore request failed: {e}"))?;
+
+        let status = resp.status();
+        let text = resp
+            .text()
+            .await
+            .map_err(|e| anyhow!("failed to read manticore response: {e}"))?;
+
+        if !status.is_success() {
+            return Err(anyhow!("manticore error {status}: {text}"));
+        }
+
+        serde_json::from_str(&text)
+            .map_err(|e| anyhow!("failed to parse manticore response: {e}, body: {text}"))
+    }
+
     pub async fn create_index(&self) -> Result<()> {
         let create_sql = format!(
             r#"CREATE TABLE IF NOT EXISTS {} (
@@ -139,99 +163,28 @@ impl SearchClient {
         limit: i32,
         offset: i32,
     ) -> Result<AdvancedSearchResult> {
-        let clean = |s: &str| {
-            s.replace('\'', " ")
-                .replace('"', " ")
-                .replace('\\', " ")
-                .replace('@', " ")
-                .replace('!', " ")
-                .replace('^', " ")
-        };
+        let t = item_type.unwrap_or("song");
 
-        let cleaned_query = clean(query);
-        let mut match_expr = if cleaned_query.ends_with('*') {
-            cleaned_query
-        } else {
-            format!("{}*", cleaned_query)
-        };
+        let mut must: Vec<serde_json::Value> = vec![
+            serde_json::json!({ "match": { "*": query } }),
+            serde_json::json!({ "equals": { "item_type": t } }),
+        ];
         if let Some(a) = artist_filter {
-            match_expr.push_str(&format!(" @artist_name {}", clean(a)));
+            must.push(serde_json::json!({ "match": { "artist_name": a } }));
         }
         if let Some(a) = album_filter {
-            match_expr.push_str(&format!(" @album_name {}", clean(a)));
+            must.push(serde_json::json!({ "match": { "album_name": a } }));
         }
 
-        if let Some(t) = item_type {
-            let sql = format!(
-                "SELECT doc_id FROM {} WHERE MATCH('{}') AND item_type='{}' LIMIT {}, {}",
-                self.index_name, match_expr, t, offset, limit
-            );
+        let body = serde_json::json!({
+            "index": self.index_name,
+            "query": { "bool": { "must": must } },
+            "source": ["doc_id"],
+            "limit": limit,
+            "offset": offset,
+        });
 
-            let response = self.sql(&sql).await?;
-
-            let empty_vec: Vec<serde_json::Value> = vec![];
-            let hits = response["hits"]["hits"].as_array().unwrap_or(&empty_vec);
-            let total = response["hits"]["total"].as_i64()
-                .or_else(|| response["hits"]["total"]["value"].as_i64())
-                .unwrap_or(hits.len() as i64);
-
-            let ids: Vec<String> = {
-                let mut seen = std::collections::HashSet::new();
-                hits.iter()
-                    .filter_map(|h| h["_source"]["doc_id"].as_str().map(|s| s.to_string()))
-                    .filter(|id| seen.insert(id.clone()))
-                    .collect()
-            };
-
-            let mut items = Vec::new();
-            match t {
-                "song" => {
-                    let map = self.fetch_songs_batch(pool, &ids).await?;
-                    for id in &ids {
-                        if let Some(song) = map.get(id) {
-                            if let Some(isrc) = isrc_filter {
-                                if song.isrc.to_lowercase() != isrc.to_lowercase() {
-                                    continue;
-                                }
-                            }
-                            items.push(SearchResultItem::Song(song.clone()));
-                        }
-                    }
-                }
-                "artist" => {
-                    let map = self.fetch_artists_batch(pool, &ids).await?;
-                    for id in &ids {
-                        if let Some(artist) = map.get(id) {
-                            items.push(SearchResultItem::Artist(artist.clone()));
-                        }
-                    }
-                }
-                "album" => {
-                    let map = self.fetch_albums_batch(pool, &ids).await?;
-                    for id in &ids {
-                        if let Some(album) = map.get(id) {
-                            if let Some(upc) = upc_filter {
-                                if album.upc.to_lowercase() != upc.to_lowercase() {
-                                    continue;
-                                }
-                            }
-                            items.push(SearchResultItem::Album(album.clone()));
-                        }
-                    }
-                }
-                _ => {}
-            }
-
-            items.sort_by_key(|item| Self::rank_relevance(Self::result_name(item), query));
-            return Ok(AdvancedSearchResult { items, total });
-        }
-
-        let sql = format!(
-            "SELECT doc_id FROM {} WHERE MATCH('{}') AND item_type='song' LIMIT {}, {}",
-            self.index_name, match_expr, offset, limit
-        );
-
-        let response = self.sql(&sql).await?;
+        let response = self.search_json(body).await?;
 
         let empty_vec: Vec<serde_json::Value> = vec![];
         let hits = response["hits"]["hits"].as_array().unwrap_or(&empty_vec);
@@ -247,17 +200,43 @@ impl SearchClient {
                 .collect()
         };
 
-        let map = self.fetch_songs_batch(pool, &ids).await?;
         let mut items = Vec::new();
-        for id in &ids {
-            if let Some(song) = map.get(id) {
-                if let Some(isrc) = isrc_filter {
-                    if song.isrc.to_lowercase() != isrc.to_lowercase() {
-                        continue;
+        match t {
+            "song" => {
+                let map = self.fetch_songs_batch(pool, &ids).await?;
+                for id in &ids {
+                    if let Some(song) = map.get(id) {
+                        if let Some(isrc) = isrc_filter {
+                            if song.isrc.to_lowercase() != isrc.to_lowercase() {
+                                continue;
+                            }
+                        }
+                        items.push(SearchResultItem::Song(song.clone()));
                     }
                 }
-                items.push(SearchResultItem::Song(song.clone()));
             }
+            "artist" => {
+                let map = self.fetch_artists_batch(pool, &ids).await?;
+                for id in &ids {
+                    if let Some(artist) = map.get(id) {
+                        items.push(SearchResultItem::Artist(artist.clone()));
+                    }
+                }
+            }
+            "album" => {
+                let map = self.fetch_albums_batch(pool, &ids).await?;
+                for id in &ids {
+                    if let Some(album) = map.get(id) {
+                        if let Some(upc) = upc_filter {
+                            if album.upc.to_lowercase() != upc.to_lowercase() {
+                                continue;
+                            }
+                        }
+                        items.push(SearchResultItem::Album(album.clone()));
+                    }
+                }
+            }
+            _ => {}
         }
 
         items.sort_by_key(|item| Self::rank_relevance(Self::result_name(item), query));
