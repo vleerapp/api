@@ -1,6 +1,6 @@
 use axum::{
     Json, Router,
-    extract::{Path, Query, State},
+    extract::{Query, State},
     http::StatusCode,
     response::IntoResponse,
 };
@@ -35,16 +35,9 @@ pub struct SearchQuery {
     pub offset: i32,
 }
 
-fn default_limit() -> i32 {
-    20
-}
-
-pub fn router() -> Router<SearchState> {
-    Router::new()
-        .route("/search", axum::routing::get(search_handler))
-        .route("/song/{id}", axum::routing::get(get_song_handler))
-        .route("/artist/{id}", axum::routing::get(get_artist_handler))
-        .route("/album/{id}", axum::routing::get(get_album_handler))
+#[derive(Debug, Deserialize)]
+pub struct LookupQuery {
+    pub id: String,
 }
 
 fn is_valid_omid(id: &str) -> bool {
@@ -52,6 +45,16 @@ fn is_valid_omid(id: &str) -> bool {
         && id
             .chars()
             .all(|c| c.is_ascii_digit() || (c >= 'a' && c <= 'z'))
+}
+
+fn default_limit() -> i32 {
+    20
+}
+
+pub fn router() -> Router<SearchState> {
+    Router::new()
+        .route("/search", axum::routing::get(search_handler))
+        .route("/lookup", axum::routing::get(lookup_handler))
 }
 
 async fn search_handler(
@@ -113,89 +116,66 @@ async fn search_handler(
     }
 }
 
-async fn get_song_handler(
+async fn lookup_handler(
     State(state): State<SearchState>,
-    Path(id): Path<String>,
+    Query(params): Query<LookupQuery>,
 ) -> impl IntoResponse {
-    if !is_valid_omid(&id) {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(
-                json!({ "error": "Invalid OMID format. Must be 16 lowercase alphanumeric characters." }),
-            ),
-        );
-    }
+    let ids: Vec<&str> = params.id.split(',').map(|s| s.trim()).collect();
 
-    match state.client.get_song_by_id(&state.scrape_pool, &id).await {
-        Ok(Some(song)) => (StatusCode::OK, Json(serde_json::to_value(song).unwrap())),
-        Ok(None) => (
-            StatusCode::NOT_FOUND,
-            Json(json!({ "error": "Song not found" })),
-        ),
-        Err(e) => {
-            tracing::error!("get song error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "error": "Failed to fetch song" })),
-            )
+    let mut results: Vec<serde_json::Value> = Vec::new();
+    let mut errors: Vec<serde_json::Value> = Vec::new();
+
+    for raw_id in ids {
+        let parts: Vec<&str> = raw_id.splitn(3, ':').collect();
+        if parts.len() != 3 || parts[0] != "omm" {
+            errors.push(json!({ "id": raw_id, "error": "Invalid format. Expected omm:TYPE:ID" }));
+            continue;
+        }
+
+        let item_type = parts[1];
+        let id = parts[2];
+
+        if !is_valid_omid(id) {
+            errors.push(json!({ "id": raw_id, "error": "Invalid OMID format. Must be 16 lowercase alphanumeric characters." }));
+            continue;
+        }
+
+        match item_type {
+            "song" => match state.client.get_song_by_id(&state.scrape_pool, id).await {
+                Ok(Some(song)) => results.push(serde_json::to_value(song).unwrap()),
+                Ok(None) => errors.push(json!({ "id": raw_id, "error": "Not found" })),
+                Err(e) => {
+                    tracing::error!("lookup error: {}", e);
+                    errors.push(json!({ "id": raw_id, "error": "Lookup failed" }));
+                }
+            },
+            "artist" => match state.client.get_artist_by_id(&state.scrape_pool, id).await {
+                Ok(Some(artist)) => results.push(serde_json::to_value(artist).unwrap()),
+                Ok(None) => errors.push(json!({ "id": raw_id, "error": "Not found" })),
+                Err(e) => {
+                    tracing::error!("lookup error: {}", e);
+                    errors.push(json!({ "id": raw_id, "error": "Lookup failed" }));
+                }
+            },
+            "album" => match state.client.get_album_by_id(&state.scrape_pool, id).await {
+                Ok(Some(album)) => results.push(serde_json::to_value(album).unwrap()),
+                Ok(None) => errors.push(json!({ "id": raw_id, "error": "Not found" })),
+                Err(e) => {
+                    tracing::error!("lookup error: {}", e);
+                    errors.push(json!({ "id": raw_id, "error": "Lookup failed" }));
+                }
+            },
+            _ => {
+                errors.push(json!({ "id": raw_id, "error": "Unknown type. Must be song, artist, or album" }));
+            }
         }
     }
-}
 
-async fn get_artist_handler(
-    State(state): State<SearchState>,
-    Path(id): Path<String>,
-) -> impl IntoResponse {
-    if !is_valid_omid(&id) {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(
-                json!({ "error": "Invalid OMID format. Must be 16 lowercase alphanumeric characters." }),
-            ),
-        );
-    }
+    let status = if results.is_empty() && !errors.is_empty() {
+        StatusCode::NOT_FOUND
+    } else {
+        StatusCode::OK
+    };
 
-    match state.client.get_artist_by_id(&state.scrape_pool, &id).await {
-        Ok(Some(artist)) => (StatusCode::OK, Json(serde_json::to_value(artist).unwrap())),
-        Ok(None) => (
-            StatusCode::NOT_FOUND,
-            Json(json!({ "error": "Artist not found" })),
-        ),
-        Err(e) => {
-            tracing::error!("get artist error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "error": "Failed to fetch artist" })),
-            )
-        }
-    }
-}
-
-async fn get_album_handler(
-    State(state): State<SearchState>,
-    Path(id): Path<String>,
-) -> impl IntoResponse {
-    if !is_valid_omid(&id) {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(
-                json!({ "error": "Invalid OMID format. Must be 16 lowercase alphanumeric characters." }),
-            ),
-        );
-    }
-
-    match state.client.get_album_by_id(&state.scrape_pool, &id).await {
-        Ok(Some(album)) => (StatusCode::OK, Json(serde_json::to_value(album).unwrap())),
-        Ok(None) => (
-            StatusCode::NOT_FOUND,
-            Json(json!({ "error": "Album not found" })),
-        ),
-        Err(e) => {
-            tracing::error!("get album error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "error": "Failed to fetch album" })),
-            )
-        }
-    }
+    (status, Json(json!({ "data": results, "errors": errors })))
 }
