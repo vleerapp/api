@@ -1,6 +1,9 @@
 use sqlx::postgres::{PgConnectOptions, PgPool, PgPoolOptions};
 use std::{env, str::FromStr};
 
+pub mod metadata;
+pub mod telemetry;
+
 pub async fn create_pool() -> Result<PgPool, sqlx::Error> {
     let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set in .env");
 
