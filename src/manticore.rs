@@ -1,23 +1,10 @@
 use anyhow::{Result, anyhow};
 use reqwest::Client;
-use serde::{Deserialize, Serialize};
-use sqlx::{PgPool, Row};
-use std::collections::HashMap;
-
-use crate::models::metadata::{
-    Album, AlbumRef, Artist, ArtistRef, SearchResultItem, Song, SongSummary,
-};
 
 pub struct SearchClient {
     http: Client,
     url: String,
     index_name: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AdvancedSearchResult {
-    pub items: Vec<SearchResultItem>,
-    pub total: i64,
 }
 
 impl SearchClient {
@@ -79,10 +66,10 @@ impl SearchClient {
         let parsed: serde_json::Value = serde_json::from_str(&body)
             .map_err(|e| anyhow!("failed to parse manticore response: {e}, body: {body}"))?;
 
-        if let Some(err) = parsed[0]["error"].as_str() {
-            if !err.is_empty() {
-                return Err(anyhow!("manticore sql error: {err}"));
-            }
+        if let Some(err) = parsed[0]["error"].as_str()
+            && !err.is_empty()
+        {
+            return Err(anyhow!("manticore sql error: {err}"));
         }
 
         Ok(parsed)
@@ -130,57 +117,31 @@ impl SearchClient {
         Ok(())
     }
 
-    fn result_name(item: &SearchResultItem) -> &str {
-        match item {
-            SearchResultItem::Song(s) => &s.name,
-            SearchResultItem::Artist(a) => &a.name,
-            SearchResultItem::Album(a) => &a.name,
-        }
-    }
-
-    fn rank_relevance(name: &str, query: &str) -> u8 {
-        let name_lc = name.to_lowercase();
-        let query_lc = query.to_lowercase();
-        if name == query {
-            0
-        } else if name_lc == query_lc {
-            1
-        } else if name_lc.starts_with(&query_lc) {
-            2
-        } else {
-            3
-        }
-    }
-
-    pub async fn search_advanced(
+    pub async fn search(
         &self,
-        pool: &PgPool,
-        query: &str,
-        item_type: Option<&str>,
-        artist_filter: Option<&str>,
-        album_filter: Option<&str>,
-        isrc_filter: Option<&str>,
-        upc_filter: Option<&str>,
+        item_type: &str,
+        name: Option<&str>,
+        artist: Option<&str>,
+        album: Option<&str>,
         limit: i32,
         offset: i32,
-    ) -> Result<AdvancedSearchResult> {
-        let t = item_type.unwrap_or("song");
-
-        let mut must: Vec<serde_json::Value> = vec![
-            serde_json::json!({ "match": { "*": query } }),
-            serde_json::json!({ "equals": { "item_type": t } }),
-        ];
-        if let Some(a) = artist_filter {
+    ) -> Result<Vec<(String, String)>> {
+        let mut must: Vec<serde_json::Value> =
+            vec![serde_json::json!({ "equals": { "item_type": item_type } })];
+        if let Some(n) = name {
+            must.push(serde_json::json!({ "match": { "name": n } }));
+        }
+        if let Some(a) = artist {
             must.push(serde_json::json!({ "match": { "artist_name": a } }));
         }
-        if let Some(a) = album_filter {
+        if let Some(a) = album {
             must.push(serde_json::json!({ "match": { "album_name": a } }));
         }
 
         let body = serde_json::json!({
             "index": self.index_name,
             "query": { "bool": { "must": must } },
-            "source": ["doc_id"],
+            "source": ["doc_id", "name"],
             "limit": limit,
             "offset": offset,
         });
@@ -189,501 +150,19 @@ impl SearchClient {
 
         let empty_vec: Vec<serde_json::Value> = vec![];
         let hits = response["hits"]["hits"].as_array().unwrap_or(&empty_vec);
-        let total = response["hits"]["total"]
-            .as_i64()
-            .or_else(|| response["hits"]["total"]["value"].as_i64())
-            .unwrap_or(hits.len() as i64);
 
-        let ids: Vec<String> = {
-            let mut seen = std::collections::HashSet::new();
-            hits.iter()
-                .filter_map(|h| h["_source"]["doc_id"].as_str().map(|s| s.to_string()))
-                .filter(|id| seen.insert(id.clone()))
-                .collect()
-        };
+        let mut seen = std::collections::HashSet::new();
+        let candidates: Vec<(String, String)> = hits
+            .iter()
+            .filter_map(|h| {
+                let id = h["_source"]["doc_id"].as_str()?.to_string();
+                let name = h["_source"]["name"].as_str().unwrap_or("").to_string();
+                Some((id, name))
+            })
+            .filter(|(id, _)| seen.insert(id.clone()))
+            .collect();
 
-        let mut items = Vec::new();
-        match t {
-            "song" => {
-                let map = self.fetch_songs_batch(pool, &ids).await?;
-                for id in &ids {
-                    if let Some(song) = map.get(id) {
-                        if let Some(isrc) = isrc_filter {
-                            if song.isrc.to_lowercase() != isrc.to_lowercase() {
-                                continue;
-                            }
-                        }
-                        items.push(SearchResultItem::Song(song.clone()));
-                    }
-                }
-            }
-            "artist" => {
-                let map = self.fetch_artists_batch(pool, &ids).await?;
-                for id in &ids {
-                    if let Some(artist) = map.get(id) {
-                        items.push(SearchResultItem::Artist(artist.clone()));
-                    }
-                }
-            }
-            "album" => {
-                let map = self.fetch_albums_batch(pool, &ids).await?;
-                for id in &ids {
-                    if let Some(album) = map.get(id) {
-                        if let Some(upc) = upc_filter {
-                            if album.upc.to_lowercase() != upc.to_lowercase() {
-                                continue;
-                            }
-                        }
-                        items.push(SearchResultItem::Album(album.clone()));
-                    }
-                }
-            }
-            _ => {}
-        }
-
-        items.sort_by_key(|item| Self::rank_relevance(Self::result_name(item), query));
-        Ok(AdvancedSearchResult { items, total })
-    }
-
-    pub async fn get_song_by_id(&self, pool: &PgPool, id: &str) -> Result<Option<Song>> {
-        self.fetch_song_details(pool, id).await
-    }
-
-    pub async fn get_artist_by_id(&self, pool: &PgPool, id: &str) -> Result<Option<Artist>> {
-        self.fetch_artist_details(pool, id).await
-    }
-
-    pub async fn get_album_by_id(&self, pool: &PgPool, id: &str) -> Result<Option<Album>> {
-        self.fetch_album_details(pool, id).await
-    }
-
-    async fn fetch_songs_batch(
-        &self,
-        pool: &PgPool,
-        ids: &[String],
-    ) -> Result<HashMap<String, SongSummary>> {
-        if ids.is_empty() {
-            return Ok(HashMap::new());
-        }
-        let rows = sqlx::query(
-            r#"WITH artists_agg AS (
-                    SELECT
-                        sa.song_id,
-                        json_agg(json_build_object('id', a.id, 'name', a.name) ORDER BY a.name) AS artists_json
-                    FROM song_artists sa
-                    JOIN artists a ON sa.artist_id = a.id
-                    WHERE sa.song_id = ANY($1)
-                    GROUP BY sa.song_id
-                ),
-                albums_agg AS (
-                    SELECT
-                        sal.song_id,
-                        json_agg(json_build_object('id', al.id, 'name', al.name) ORDER BY al.name) AS albums_json
-                    FROM song_albums sal
-                    JOIN albums al ON sal.album_id = al.id
-                    WHERE sal.song_id = ANY($1)
-                    GROUP BY sal.song_id
-                ),
-                genres_agg AS (
-                    SELECT
-                        sg.song_id,
-                        array_agg(g.name ORDER BY g.name) AS genres
-                    FROM song_genres sg
-                    JOIN genres g ON sg.genre_id = g.id
-                    WHERE sg.song_id = ANY($1)
-                    GROUP BY sg.song_id
-                )
-               SELECT s.id, s.name, s.image, s.duration,
-                      s.disc_number, s.track_number, s.isrc, s.date,
-                      artists_agg.artists_json,
-                      albums_agg.albums_json,
-                      COALESCE(genres_agg.genres, '{}') AS genres
-               FROM songs s
-               LEFT JOIN artists_agg ON artists_agg.song_id = s.id
-               LEFT JOIN albums_agg ON albums_agg.song_id = s.id
-               LEFT JOIN genres_agg ON genres_agg.song_id = s.id
-               WHERE s.id = ANY($1)
-            "#,
-        )
-        .bind(ids)
-        .fetch_all(pool)
-        .await?;
-
-        let mut map = HashMap::new();
-        for r in rows {
-            let artists_json: Option<serde_json::Value> = r.get("artists_json");
-            let albums_json: Option<serde_json::Value> = r.get("albums_json");
-            let artists: Vec<ArtistRef> = match artists_json {
-                Some(v) => serde_json::from_value(v).unwrap_or_default(),
-                None => vec![],
-            };
-            let albums: Vec<AlbumRef> = match albums_json {
-                Some(v) => serde_json::from_value(v).unwrap_or_default(),
-                None => vec![],
-            };
-            if artists.is_empty() || albums.is_empty() {
-                continue;
-            }
-            let genres: Vec<String> = r.get::<Vec<String>, _>("genres");
-            let id: String = r.get("id");
-            map.insert(
-                id.clone(),
-                SongSummary {
-                    id,
-                    name: r.get("name"),
-                    artist: artists,
-                    album: albums,
-                    genres,
-                    image: r.get("image"),
-                    disc_number: r.get::<i64, _>("disc_number") as i32,
-                    track_number: r.get::<i64, _>("track_number") as i32,
-                    duration: r.get::<i64, _>("duration") as i32,
-                    isrc: r.get("isrc"),
-                    date: r.get("date"),
-                },
-            );
-        }
-        Ok(map)
-    }
-
-    async fn fetch_artists_batch(
-        &self,
-        pool: &PgPool,
-        ids: &[String],
-    ) -> Result<HashMap<String, Artist>> {
-        if ids.is_empty() {
-            return Ok(HashMap::new());
-        }
-        let rows = sqlx::query(
-            r#"SELECT a.id, a.name, a.image,
-                      COALESCE(array_agg(DISTINCT g.name) FILTER (WHERE g.name IS NOT NULL), '{}') AS genres
-               FROM artists a
-               LEFT JOIN artist_genres ag ON ag.artist_id = a.id
-               LEFT JOIN genres g ON g.id = ag.genre_id
-               WHERE a.id = ANY($1)
-               GROUP BY a.id, a.name, a.image"#,
-        )
-        .bind(ids)
-        .fetch_all(pool)
-        .await?;
-
-        let mut map = HashMap::new();
-        for r in rows {
-            let id: String = r.get("id");
-            map.insert(
-                id.clone(),
-                Artist {
-                    id,
-                    name: r.get("name"),
-                    image: r.get("image"),
-                    genres: r.get::<Vec<String>, _>("genres"),
-                },
-            );
-        }
-        Ok(map)
-    }
-
-    async fn fetch_albums_batch(
-        &self,
-        pool: &PgPool,
-        ids: &[String],
-    ) -> Result<HashMap<String, Album>> {
-        if ids.is_empty() {
-            return Ok(HashMap::new());
-        }
-        let rows = sqlx::query(
-            r#"WITH album_genres_agg AS (
-                    SELECT
-                        ag.album_id,
-                        array_agg(g.name ORDER BY g.name) AS genres
-                    FROM album_genres ag
-                    JOIN genres g ON ag.genre_id = g.id
-                    WHERE ag.album_id = ANY($1)
-                    GROUP BY ag.album_id
-                )
-               SELECT al.id, al.name, al.image, al.date,
-                      al.track_count, al.upc, al.label,
-                      json_agg(json_build_object('id', a.id, 'name', a.name, 'image', a.image, 'genres', '[]'::json) ORDER BY a.name) as artists_json,
-                      COALESCE(aga.genres, '{}') AS genres
-               FROM albums al
-               LEFT JOIN artist_albums aa ON al.id = aa.album_id
-               LEFT JOIN artists a ON aa.artist_id = a.id
-               LEFT JOIN album_genres_agg aga ON aga.album_id = al.id
-               WHERE al.id = ANY($1)
-               GROUP BY al.id, al.name, al.image, al.date,
-                        al.track_count, al.upc, al.label, aga.genres"#,
-        )
-        .bind(ids)
-        .fetch_all(pool)
-        .await?;
-
-        let mut map = HashMap::new();
-        for r in rows {
-            let artists_json: Option<serde_json::Value> = r.get("artists_json");
-            let artists: Vec<Artist> = match artists_json {
-                Some(v) => serde_json::from_value(v).unwrap_or_default(),
-                None => vec![],
-            };
-            if artists.is_empty() {
-                continue;
-            }
-            let id: String = r.get("id");
-            map.insert(
-                id.clone(),
-                Album {
-                    id,
-                    name: r.get("name"),
-                    artist: artists,
-                    genres: r.get::<Vec<String>, _>("genres"),
-                    image: r.get("image"),
-                    date: r.get::<Option<String>, _>("date").unwrap_or_default(),
-                    track_count: r.get::<i64, _>("track_count") as i32,
-                    upc: r.get("upc"),
-                    label: r.get::<Option<String>, _>("label"),
-                },
-            );
-        }
-        Ok(map)
-    }
-
-    async fn fetch_song_details(&self, pool: &PgPool, id: &str) -> Result<Option<Song>> {
-        let row = sqlx::query(
-            r#"WITH song_genres_agg AS (
-                    SELECT
-                        sg.song_id,
-                        array_agg(g.name ORDER BY g.name) AS genres
-                    FROM song_genres sg
-                    JOIN genres g ON sg.genre_id = g.id
-                    WHERE sg.song_id = $1
-                    GROUP BY sg.song_id
-                ),
-                artist_genres_agg AS (
-                    SELECT
-                        ag.artist_id,
-                        array_agg(g.name ORDER BY g.name) AS genres
-                    FROM artist_genres ag
-                    JOIN genres g ON ag.genre_id = g.id
-                    WHERE ag.artist_id IN (
-                        SELECT sa.artist_id FROM song_artists sa WHERE sa.song_id = $1
-                    )
-                    GROUP BY ag.artist_id
-                ),
-                artist_agg AS (
-                    SELECT
-                        sa.song_id,
-                        json_agg(json_build_object(
-                            'id', a.id,
-                            'name', a.name,
-                            'image', a.image,
-                            'genres', COALESCE(to_json(aga.genres), '[]'::json)
-                        ) ORDER BY a.name) AS artists_json
-                    FROM song_artists sa
-                    JOIN artists a ON sa.artist_id = a.id
-                    LEFT JOIN artist_genres_agg aga ON aga.artist_id = a.id
-                    WHERE sa.song_id = $1
-                    GROUP BY sa.song_id
-                ),
-                album_artist_genres_agg AS (
-                    SELECT
-                        ag.artist_id,
-                        array_agg(g.name ORDER BY g.name) AS genres
-                    FROM artist_genres ag
-                    JOIN genres g ON ag.genre_id = g.id
-                    WHERE ag.artist_id IN (
-                        SELECT aa.artist_id FROM artist_albums aa
-                        WHERE aa.album_id IN (
-                            SELECT sal.album_id FROM song_albums sal WHERE sal.song_id = $1
-                        )
-                    )
-                    GROUP BY ag.artist_id
-                ),
-                album_artists_agg AS (
-                    SELECT
-                        aa.album_id,
-                        json_agg(json_build_object(
-                            'id', a.id,
-                            'name', a.name,
-                            'image', a.image,
-                            'genres', COALESCE(to_json(aaga.genres), '[]'::json)
-                        ) ORDER BY a.name) AS artists_json
-                    FROM artist_albums aa
-                    JOIN artists a ON aa.artist_id = a.id
-                    LEFT JOIN album_artist_genres_agg aaga ON aaga.artist_id = a.id
-                    WHERE aa.album_id IN (
-                        SELECT sal.album_id FROM song_albums sal WHERE sal.song_id = $1
-                    )
-                    GROUP BY aa.album_id
-                ),
-                album_genres_agg AS (
-                    SELECT
-                        ag.album_id,
-                        array_agg(g.name ORDER BY g.name) AS genres
-                    FROM album_genres ag
-                    JOIN genres g ON ag.genre_id = g.id
-                    WHERE ag.album_id IN (
-                        SELECT sal.album_id FROM song_albums sal WHERE sal.song_id = $1
-                    )
-                    GROUP BY ag.album_id
-                ),
-                album_agg AS (
-                    SELECT
-                        sal.song_id,
-                        json_agg(json_build_object(
-                            'id', al.id,
-                            'name', al.name,
-                            'artist', COALESCE(ala.artists_json, '[]'::json),
-                            'genres', COALESCE(to_json(alga.genres), '[]'::json),
-                            'image', al.image,
-                            'date', al.date,
-                            'track_count', al.track_count,
-                            'upc', al.upc,
-                            'label', al.label
-                        ) ORDER BY al.name) AS albums_json
-                    FROM song_albums sal
-                    JOIN albums al ON sal.album_id = al.id
-                    LEFT JOIN album_artists_agg ala ON ala.album_id = al.id
-                    LEFT JOIN album_genres_agg alga ON alga.album_id = al.id
-                    WHERE sal.song_id = $1
-                    GROUP BY sal.song_id
-                )
-               SELECT s.id, s.name, s.image, s.duration,
-                      s.disc_number, s.track_number, s.isrc, s.date,
-                      artist_agg.artists_json,
-                      album_agg.albums_json,
-                      COALESCE(song_genres_agg.genres, '{}') AS genres
-               FROM songs s
-               LEFT JOIN artist_agg ON artist_agg.song_id = s.id
-               LEFT JOIN album_agg ON album_agg.song_id = s.id
-               LEFT JOIN song_genres_agg ON song_genres_agg.song_id = s.id
-               WHERE s.id = $1
-            "#,
-        )
-        .bind(id)
-        .fetch_optional(pool)
-        .await?;
-
-        match row {
-            Some(r) => {
-                let artists_json: Option<serde_json::Value> = r.get("artists_json");
-                let albums_json: Option<serde_json::Value> = r.get("albums_json");
-                let artists: Vec<Artist> = match artists_json {
-                    Some(v) => serde_json::from_value(v).unwrap_or_default(),
-                    None => vec![],
-                };
-                let albums: Vec<Album> = match albums_json {
-                    Some(v) => serde_json::from_value(v).unwrap_or_default(),
-                    None => vec![],
-                };
-
-                if artists.is_empty() || albums.is_empty() {
-                    return Ok(None);
-                }
-
-                Ok(Some(Song {
-                    id: r.get("id"),
-                    name: r.get("name"),
-                    artist: artists,
-                    album: albums,
-                    genres: r.get::<Vec<String>, _>("genres"),
-                    image: r.get("image"),
-                    disc_number: r.get::<i64, _>("disc_number") as i32,
-                    track_number: r.get::<i64, _>("track_number") as i32,
-                    duration: r.get::<i64, _>("duration") as i32,
-                    isrc: r.get("isrc"),
-                    date: r.get("date"),
-                }))
-            }
-            None => Ok(None),
-        }
-    }
-
-    async fn fetch_artist_details(&self, pool: &PgPool, id: &str) -> Result<Option<Artist>> {
-        let row = sqlx::query(
-            r#"SELECT a.id, a.name, a.image,
-                      COALESCE(array_agg(DISTINCT g.name) FILTER (WHERE g.name IS NOT NULL), '{}') AS genres
-               FROM artists a
-               LEFT JOIN artist_genres ag ON ag.artist_id = a.id
-               LEFT JOIN genres g ON g.id = ag.genre_id
-               WHERE a.id = $1
-               GROUP BY a.id, a.name, a.image"#,
-        )
-        .bind(id)
-        .fetch_optional(pool)
-        .await?;
-
-        match row {
-            Some(r) => Ok(Some(Artist {
-                id: r.get("id"),
-                name: r.get("name"),
-                image: r.get("image"),
-                genres: r.get::<Vec<String>, _>("genres"),
-            })),
-            None => Ok(None),
-        }
-    }
-
-    async fn fetch_album_details(&self, pool: &PgPool, id: &str) -> Result<Option<Album>> {
-        let row = sqlx::query(
-            r#"WITH artist_genres_agg AS (
-                    SELECT
-                        ag.artist_id,
-                        array_agg(g.name ORDER BY g.name) AS genres
-                    FROM artist_genres ag
-                    JOIN genres g ON ag.genre_id = g.id
-                    WHERE ag.artist_id IN (
-                        SELECT aa.artist_id FROM artist_albums aa WHERE aa.album_id = $1
-                    )
-                    GROUP BY ag.artist_id
-                )
-               SELECT al.id, al.name, al.image, al.date,
-                      al.track_count, al.upc, al.label,
-                      json_agg(json_build_object(
-                          'id', a.id,
-                          'name', a.name,
-                          'image', a.image,
-                          'genres', COALESCE(to_json(aga.genres), '[]'::json)
-                      ) ORDER BY a.name) as artists_json,
-                      COALESCE(array_agg(DISTINCT g2.name) FILTER (WHERE g2.name IS NOT NULL), '{}') AS genres
-               FROM albums al
-               LEFT JOIN artist_albums aa ON al.id = aa.album_id
-               LEFT JOIN artists a ON aa.artist_id = a.id
-               LEFT JOIN artist_genres_agg aga ON aga.artist_id = a.id
-               LEFT JOIN album_genres alg ON alg.album_id = al.id
-               LEFT JOIN genres g2 ON g2.id = alg.genre_id
-               WHERE al.id = $1
-               GROUP BY al.id, al.name, al.image, al.date,
-                        al.track_count, al.upc, al.label"#,
-        )
-        .bind(id)
-        .fetch_optional(pool)
-        .await?;
-
-        match row {
-            Some(r) => {
-                let artists_json: Option<serde_json::Value> = r.get("artists_json");
-                let artists: Vec<Artist> = match artists_json {
-                    Some(v) => serde_json::from_value(v).unwrap_or_default(),
-                    None => vec![],
-                };
-
-                if artists.is_empty() {
-                    return Ok(None);
-                }
-
-                Ok(Some(Album {
-                    id: r.get("id"),
-                    name: r.get("name"),
-                    artist: artists,
-                    genres: r.get::<Vec<String>, _>("genres"),
-                    image: r.get("image"),
-                    date: r.get::<Option<String>, _>("date").unwrap_or_default(),
-                    track_count: r.get::<i64, _>("track_count") as i32,
-                    upc: r.get("upc"),
-                    label: r.get::<Option<String>, _>("label"),
-                }))
-            }
-            None => Ok(None),
-        }
+        Ok(candidates)
     }
 
     pub async fn count(&self) -> Result<i64> {

@@ -9,35 +9,6 @@ pub struct Artist {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ArtistRef {
-    pub id: String,
-    pub name: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AlbumRef {
-    pub id: String,
-    pub name: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SongSummary {
-    pub id: String,
-    pub name: String,
-    pub artist: Vec<ArtistRef>,
-    pub album: Vec<AlbumRef>,
-    pub genres: Vec<String>,
-    pub image: String,
-    #[serde(rename = "disc_number")]
-    pub disc_number: i32,
-    #[serde(rename = "track_number")]
-    pub track_number: i32,
-    pub duration: i32,
-    pub isrc: String,
-    pub date: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Song {
     pub id: String,
     pub name: String,
@@ -66,22 +37,4 @@ pub struct Album {
     pub track_count: i32,
     pub upc: String,
     pub label: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum SearchResultItem {
-    Song(SongSummary),
-    Artist(Artist),
-    Album(Album),
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct SearchResponse {
-    #[serde(rename = "type")]
-    pub item_type: String,
-    pub data: Vec<SearchResultItem>,
-    pub total: i64,
-    pub limit: i32,
-    pub offset: i32,
 }

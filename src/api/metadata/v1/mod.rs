@@ -1,4 +1,5 @@
 pub mod metadata;
+pub mod resource;
 
 use crate::{api::metadata::v1::metadata::SearchState, manticore::SearchClient};
 use axum::Router;
