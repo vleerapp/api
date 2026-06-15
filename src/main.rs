@@ -70,6 +70,17 @@ async fn main() {
                     Err(e) => info!("manticore ready, could not get count: {}", e),
                 }
             }
+            let ping_client = client.clone();
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+                loop {
+                    interval.tick().await;
+                    if let Err(e) = ping_client.ping().await {
+                        tracing::warn!("manticore keepalive failed: {}", e);
+                    }
+                }
+            });
+
             client
         }
         Err(e) => {

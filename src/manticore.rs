@@ -12,6 +12,8 @@ impl SearchClient {
         let http = Client::builder()
             .timeout(std::time::Duration::from_secs(10))
             .connect_timeout(std::time::Duration::from_secs(5))
+            .tcp_keepalive(std::time::Duration::from_secs(30))
+            .pool_idle_timeout(std::time::Duration::from_secs(90))
             .build()
             .map_err(|e| anyhow!("failed to build http client: {e}"))?;
         Ok(Self {
@@ -125,23 +127,31 @@ impl SearchClient {
         album: Option<&str>,
         limit: i32,
         offset: i32,
-    ) -> Result<Vec<(String, String)>> {
+    ) -> Result<Vec<(String, String, String, String)>> {
         let mut must: Vec<serde_json::Value> =
             vec![serde_json::json!({ "equals": { "item_type": item_type } })];
         if let Some(n) = name {
             must.push(serde_json::json!({ "match": { "name": n } }));
         }
+
+        let mut should: Vec<serde_json::Value> = vec![];
         if let Some(a) = artist {
-            must.push(serde_json::json!({ "match": { "artist_name": a } }));
+            should.push(serde_json::json!({ "match": { "artist_name": a } }));
         }
         if let Some(a) = album {
-            must.push(serde_json::json!({ "match": { "album_name": a } }));
+            should.push(serde_json::json!({ "match": { "album_name": a } }));
         }
+
+        let query = if should.is_empty() {
+            serde_json::json!({ "bool": { "must": must } })
+        } else {
+            serde_json::json!({ "bool": { "must": must, "should": should } })
+        };
 
         let body = serde_json::json!({
             "index": self.index_name,
-            "query": { "bool": { "must": must } },
-            "source": ["doc_id", "name"],
+            "query": query,
+            "source": ["doc_id", "name", "artist_name", "album_name"],
             "limit": limit,
             "offset": offset,
         });
@@ -152,17 +162,29 @@ impl SearchClient {
         let hits = response["hits"]["hits"].as_array().unwrap_or(&empty_vec);
 
         let mut seen = std::collections::HashSet::new();
-        let candidates: Vec<(String, String)> = hits
+        let candidates: Vec<(String, String, String, String)> = hits
             .iter()
             .filter_map(|h| {
                 let id = h["_source"]["doc_id"].as_str()?.to_string();
                 let name = h["_source"]["name"].as_str().unwrap_or("").to_string();
-                Some((id, name))
+                let artist = h["_source"]["artist_name"].as_str().unwrap_or("").to_string();
+                let album = h["_source"]["album_name"].as_str().unwrap_or("").to_string();
+                Some((id, name, artist, album))
             })
-            .filter(|(id, _)| seen.insert(id.clone()))
+            .filter(|(id, _, _, _)| seen.insert(id.clone()))
             .collect();
 
         Ok(candidates)
+    }
+
+    pub async fn ping(&self) -> Result<()> {
+        let body = serde_json::json!({
+            "index": self.index_name,
+            "query": { "bool": { "must": [{ "equals": { "item_type": "song" } }] } },
+            "limit": 1,
+        });
+        self.search_json(body).await?;
+        Ok(())
     }
 
     pub async fn count(&self) -> Result<i64> {

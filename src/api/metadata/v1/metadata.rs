@@ -22,22 +22,35 @@ pub struct SearchState {
 }
 
 const MAX_LOOKUP_VALUES: usize = 100;
-const MATCH_CANDIDATES: i32 = 25;
+const MATCH_CANDIDATES: i32 = 50;
 
-fn name_rank(candidate: &str, query: &str) -> u8 {
-    let c = candidate.trim().to_lowercase();
-    let q = query.trim().to_lowercase();
-    if candidate == query {
-        0
-    } else if c == q {
-        1
-    } else if c.starts_with(&q) {
-        2
-    } else if c.contains(&q) {
-        3
-    } else {
-        4
+fn best_jw(candidate_joined: &str, query: &str) -> f64 {
+    let q = query.to_lowercase();
+    let c = candidate_joined.to_lowercase();
+    if c.contains(q.as_str()) {
+        return 1.0;
     }
+    c.split_whitespace()
+        .map(|part| strsim::jaro_winkler(part.trim_matches(','), q.as_str()))
+        .fold(0.0_f64, f64::max)
+}
+
+fn score_candidate(
+    cn: &str,
+    ca: &str,
+    cal: &str,
+    qn: &str,
+    qa: Option<&str>,
+    qal: Option<&str>,
+) -> f64 {
+    let mut score = strsim::jaro_winkler(&cn.to_lowercase(), &qn.to_lowercase()) * 0.6;
+    if let Some(a) = qa {
+        score += best_jw(ca, a) * 0.3;
+    }
+    if let Some(a) = qal {
+        score += best_jw(cal, a) * 0.1;
+    }
+    score
 }
 
 #[derive(Debug, Deserialize)]
@@ -326,10 +339,12 @@ async fn match_handler(
         }
     };
 
-    let Some((matched_id, _)) = candidates
-        .iter()
-        .min_by_key(|(_, candidate_name)| name_rank(candidate_name, name))
-    else {
+    let Some((matched_id, _, _, _)) = candidates.iter().max_by(
+        |(_, cn1, ca1, cal1), (_, cn2, ca2, cal2)| {
+            score_candidate(cn1, ca1, cal1, name, artist, album)
+                .total_cmp(&score_candidate(cn2, ca2, cal2, name, artist, album))
+        },
+    ) else {
         return error_response(StatusCode::NOT_FOUND, "No match found").into_response();
     };
     let matched_id = matched_id.clone();
@@ -337,7 +352,9 @@ async fn match_handler(
     let fields = params.fields();
     let include = parse_includes(&params.include);
 
-    match fetch_resource(&state, &item_type, &matched_id, &fields, &include).await {
+    let result = fetch_resource(&state, &item_type, &matched_id, &fields, &include).await;
+
+    match result {
         Ok(Some(resource)) => (StatusCode::OK, Json(json!({ "data": resource }))).into_response(),
         Ok(None) => error_response(StatusCode::NOT_FOUND, "No match found").into_response(),
         Err(e) => {
