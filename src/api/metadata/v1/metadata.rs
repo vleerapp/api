@@ -10,7 +10,7 @@ use sqlx::PgPool;
 use std::sync::Arc;
 
 use crate::api::metadata::v1::resource::{
-    Fields, parse_includes, parse_set, render_album, render_artist, render_song,
+    parse_includes, render_album, render_artist, render_song,
 };
 use crate::db;
 use crate::manticore::SearchClient;
@@ -54,24 +54,8 @@ fn score_candidate(
 }
 
 #[derive(Debug, Deserialize)]
-pub struct FieldsQuery {
+pub struct IncludeQuery {
     pub include: Option<String>,
-    #[serde(rename = "fields[song]")]
-    pub fields_song: Option<String>,
-    #[serde(rename = "fields[album]")]
-    pub fields_album: Option<String>,
-    #[serde(rename = "fields[artist]")]
-    pub fields_artist: Option<String>,
-}
-
-impl FieldsQuery {
-    fn fields(&self) -> Fields {
-        Fields {
-            song: parse_set(&self.fields_song),
-            album: parse_set(&self.fields_album),
-            artist: parse_set(&self.fields_artist),
-        }
-    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -80,22 +64,6 @@ pub struct LookupQuery {
     pub isrc: Option<String>,
     pub upc: Option<String>,
     pub include: Option<String>,
-    #[serde(rename = "fields[song]")]
-    pub fields_song: Option<String>,
-    #[serde(rename = "fields[album]")]
-    pub fields_album: Option<String>,
-    #[serde(rename = "fields[artist]")]
-    pub fields_artist: Option<String>,
-}
-
-impl LookupQuery {
-    fn fields(&self) -> Fields {
-        Fields {
-            song: parse_set(&self.fields_song),
-            album: parse_set(&self.fields_album),
-            artist: parse_set(&self.fields_artist),
-        }
-    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -104,22 +72,6 @@ pub struct MatchQuery {
     pub album: Option<String>,
     pub artist: Option<String>,
     pub include: Option<String>,
-    #[serde(rename = "fields[song]")]
-    pub fields_song: Option<String>,
-    #[serde(rename = "fields[album]")]
-    pub fields_album: Option<String>,
-    #[serde(rename = "fields[artist]")]
-    pub fields_artist: Option<String>,
-}
-
-impl MatchQuery {
-    fn fields(&self) -> Fields {
-        Fields {
-            song: parse_set(&self.fields_song),
-            album: parse_set(&self.fields_album),
-            artist: parse_set(&self.fields_artist),
-        }
-    }
 }
 
 pub fn router() -> Router<SearchState> {
@@ -183,19 +135,18 @@ async fn fetch_resource(
     state: &SearchState,
     item_type: &str,
     id: &str,
-    fields: &Fields,
     include: &std::collections::HashSet<String>,
 ) -> Result<Option<Value>, sqlx::Error> {
     Ok(match item_type {
         "song" => db::metadata::get_song_by_id(&state.scrape_pool, id)
             .await?
-            .map(|s| render_song(&s, fields, include)),
+            .map(|s| render_song(&s, include)),
         "album" => db::metadata::get_album_by_id(&state.scrape_pool, id)
             .await?
-            .map(|a| render_album(&a, fields, include)),
+            .map(|a| render_album(&a, include)),
         "artist" => db::metadata::get_artist_by_id(&state.scrape_pool, id)
             .await?
-            .map(|a| render_artist(&a, &fields.artist)),
+            .map(|a| render_artist(&a)),
         _ => None,
     })
 }
@@ -221,7 +172,6 @@ async fn lookup_collection_handler(
         .into_response();
     }
 
-    let fields = params.fields();
     let include = parse_includes(&params.include);
 
     let resolved: Vec<(String, String)> = if let Some(ids) = ids {
@@ -266,7 +216,7 @@ async fn lookup_collection_handler(
 
     let mut data: Vec<Value> = Vec::new();
     for (item_type, id) in resolved {
-        match fetch_resource(&state, &item_type, &id, &fields, &include).await {
+        match fetch_resource(&state, &item_type, &id, &include).await {
             Ok(Some(resource)) => data.push(resource),
             Ok(None) => {}
             Err(e) => {
@@ -283,17 +233,16 @@ async fn lookup_collection_handler(
 async fn lookup_single_handler(
     State(state): State<SearchState>,
     Path(raw_id): Path<String>,
-    Query(params): Query<FieldsQuery>,
+    Query(params): Query<IncludeQuery>,
 ) -> impl IntoResponse {
     let Some((item_type, id)) = parse_id(&raw_id) else {
         return error_response(StatusCode::BAD_REQUEST, "Invalid id. Expected omm:TYPE:ID")
             .into_response();
     };
 
-    let fields = params.fields();
     let include = parse_includes(&params.include);
 
-    match fetch_resource(&state, &item_type, &id, &fields, &include).await {
+    match fetch_resource(&state, &item_type, &id, &include).await {
         Ok(Some(resource)) => (StatusCode::OK, Json(json!({ "data": resource }))).into_response(),
         Ok(None) => error_response(StatusCode::NOT_FOUND, "Resource not found").into_response(),
         Err(e) => {
@@ -339,20 +288,21 @@ async fn match_handler(
         }
     };
 
-    let Some((matched_id, _, _, _)) = candidates.iter().max_by(
-        |(_, cn1, ca1, cal1), (_, cn2, ca2, cal2)| {
-            score_candidate(cn1, ca1, cal1, name, artist, album)
-                .total_cmp(&score_candidate(cn2, ca2, cal2, name, artist, album))
-        },
-    ) else {
+    let Some((matched_id, _, _, _)) =
+        candidates
+            .iter()
+            .max_by(|(_, cn1, ca1, cal1), (_, cn2, ca2, cal2)| {
+                score_candidate(cn1, ca1, cal1, name, artist, album)
+                    .total_cmp(&score_candidate(cn2, ca2, cal2, name, artist, album))
+            })
+    else {
         return error_response(StatusCode::NOT_FOUND, "No match found").into_response();
     };
     let matched_id = matched_id.clone();
 
-    let fields = params.fields();
     let include = parse_includes(&params.include);
 
-    let result = fetch_resource(&state, &item_type, &matched_id, &fields, &include).await;
+    let result = fetch_resource(&state, &item_type, &matched_id, &include).await;
 
     match result {
         Ok(Some(resource)) => (StatusCode::OK, Json(json!({ "data": resource }))).into_response(),
