@@ -167,8 +167,14 @@ impl SearchClient {
             .filter_map(|h| {
                 let id = h["_source"]["doc_id"].as_str()?.to_string();
                 let name = h["_source"]["name"].as_str().unwrap_or("").to_string();
-                let artist = h["_source"]["artist_name"].as_str().unwrap_or("").to_string();
-                let album = h["_source"]["album_name"].as_str().unwrap_or("").to_string();
+                let artist = h["_source"]["artist_name"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_string();
+                let album = h["_source"]["album_name"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_string();
                 Some((id, name, artist, album))
             })
             .filter(|(id, _, _, _)| seen.insert(id.clone()))
