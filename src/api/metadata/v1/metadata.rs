@@ -159,6 +159,13 @@ async fn lookup_collection_handler(
     let isrc = params.isrc.as_deref().filter(|s| !s.is_empty());
     let upc = params.upc.as_deref().filter(|s| !s.is_empty());
 
+    if [ids, isrc, upc]
+        .iter()
+        .any(|p| p.is_some_and(|s| s.len() > 10_000))
+    {
+        return error_response(StatusCode::BAD_REQUEST, "query parameter too long").into_response();
+    }
+
     if [ids.is_some(), isrc.is_some(), upc.is_some()]
         .iter()
         .filter(|p| **p)
@@ -265,9 +272,15 @@ async fn match_handler(
     let Some(name) = name else {
         return error_response(StatusCode::BAD_REQUEST, "name is required").into_response();
     };
+    if name.len() > 256 {
+        return error_response(StatusCode::BAD_REQUEST, "name too long").into_response();
+    }
 
     let artist = params.artist.as_deref().filter(|s| !s.is_empty());
     let album = params.album.as_deref().filter(|s| !s.is_empty());
+    if artist.is_some_and(|s| s.len() > 256) || album.is_some_and(|s| s.len() > 256) {
+        return error_response(StatusCode::BAD_REQUEST, "query parameter too long").into_response();
+    }
 
     let (artist, album) = match item_type.as_str() {
         "song" => (artist, album),
