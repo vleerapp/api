@@ -7,9 +7,11 @@ mod rate_limit;
 use crate::manticore::SearchClient;
 use crate::rate_limit::rate_limit;
 use axum::Router;
+use axum::extract::DefaultBodyLimit;
+use axum::http::{HeaderValue, Method, header};
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{AllowOrigin, CorsLayer};
 use tracing::{error, info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -89,18 +91,49 @@ async fn main() {
         }
     };
 
+    let cors_origins: Vec<HeaderValue> = std::env::var("ALLOWED_ORIGINS")
+        .unwrap_or_default()
+        .split(',')
+        .filter_map(|s| {
+            let s = s.trim();
+            if s.is_empty() {
+                None
+            } else {
+                s.parse::<HeaderValue>().ok()
+            }
+        })
+        .collect();
+
+    let cors = CorsLayer::new()
+        .allow_origin(AllowOrigin::list(cors_origins))
+        .allow_methods([Method::GET, Method::POST])
+        .allow_headers([header::CONTENT_TYPE]);
+
     let app = Router::new()
         .merge(api::app_router(search_client, pool, scrape_pool))
-        .layer(CorsLayer::permissive())
+        .layer(cors)
+        .layer(DefaultBodyLimit::max(64 * 1024))
         .layer(rate_limit(20, 1000));
 
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
-    info!("server listening on 0.0.0.0:3000");
+    let bind_addr = std::env::var("BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:3000".to_string());
+    let listener = match tokio::net::TcpListener::bind(&bind_addr).await {
+        Ok(l) => {
+            info!("server listening on {}", bind_addr);
+            l
+        }
+        Err(e) => {
+            error!("failed to bind to {}: {}", bind_addr, e);
+            std::process::exit(1);
+        }
+    };
 
-    axum::serve(
+    if let Err(e) = axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
     )
     .await
-    .unwrap();
+    {
+        error!("server error: {}", e);
+        std::process::exit(1);
+    }
 }

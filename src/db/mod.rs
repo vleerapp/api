@@ -1,5 +1,9 @@
+use regex::Regex;
 use sqlx::postgres::{PgConnectOptions, PgPool, PgPoolOptions};
+use std::sync::OnceLock;
 use std::{env, str::FromStr};
+
+static DB_NAME_RE: OnceLock<Regex> = OnceLock::new();
 
 pub mod metadata;
 pub mod telemetry;
@@ -9,6 +13,13 @@ pub async fn create_pool() -> Result<PgPool, sqlx::Error> {
 
     let opts = PgConnectOptions::from_str(&database_url).expect("Invalid DATABASE_URL");
     let db_name = opts.get_database().unwrap_or("postgres").to_string();
+
+    let re = DB_NAME_RE.get_or_init(|| Regex::new(r"^[a-zA-Z0-9_]+$").unwrap());
+    if !re.is_match(&db_name) {
+        return Err(sqlx::Error::Configuration(
+            format!("invalid database name: {db_name}").into(),
+        ));
+    }
 
     let admin = PgPoolOptions::new()
         .max_connections(1)
