@@ -1,6 +1,7 @@
 use axum::{
     Json, Router,
     extract::{Query, State},
+    http::StatusCode,
     routing::{get, post},
 };
 use sqlx::PgPool;
@@ -32,14 +33,39 @@ pub fn router() -> Router<PgPool> {
 async fn submit_telemetry(
     State(pool): State<PgPool>,
     ValidatedJson(payload): ValidatedJson<TelemetrySubmission>,
-) -> axum::http::StatusCode {
+) -> StatusCode {
+    match db::telemetry::daily_submission_count(&pool, payload.user_id).await {
+        Ok(count) if count >= 10 => return StatusCode::TOO_MANY_REQUESTS,
+        Err(e) => {
+            error!("daily count error: {}", e);
+            return StatusCode::INTERNAL_SERVER_ERROR;
+        }
+        _ => {}
+    }
+
+    match db::telemetry::last_submission(&pool, payload.user_id).await {
+        Ok(Some(last)) => {
+            if last.os != payload.os.as_str() {
+                return StatusCode::UNPROCESSABLE_ENTITY;
+            }
+            if last.song_count > 100 && payload.song_count < last.song_count / 2 {
+                return StatusCode::UNPROCESSABLE_ENTITY;
+            }
+        }
+        Err(e) => {
+            error!("last submission error: {}", e);
+            return StatusCode::INTERNAL_SERVER_ERROR;
+        }
+        _ => {}
+    }
+
     debug!(user_id = %payload.user_id, "receiving telemetry");
 
     match db::telemetry::insert_submission(&pool, &payload).await {
-        Ok(_) => axum::http::StatusCode::OK,
+        Ok(_) => StatusCode::OK,
         Err(e) => {
             error!("telemetry insert error: {}", e);
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR
+            StatusCode::INTERNAL_SERVER_ERROR
         }
     }
 }
@@ -48,14 +74,14 @@ async fn resolve_time_range(
     pool: &PgPool,
     from: Option<OffsetDateTime>,
     to: Option<OffsetDateTime>,
-) -> Result<(OffsetDateTime, OffsetDateTime), axum::http::StatusCode> {
+) -> Result<(OffsetDateTime, OffsetDateTime), StatusCode> {
     let end = to.unwrap_or_else(OffsetDateTime::now_utc);
     let start = match from {
         Some(t) => t,
         None => {
             let min = db::telemetry::earliest_time(pool).await.map_err(|e| {
                 error!("min time query error: {}", e);
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR
+                StatusCode::INTERNAL_SERVER_ERROR
             })?;
             min.unwrap_or(end)
         }
@@ -66,7 +92,7 @@ async fn resolve_time_range(
 async fn get_songs_over_time(
     State(pool): State<PgPool>,
     Query(params): Query<StatsQuery>,
-) -> Result<Json<Vec<TimeSeriesPoint>>, axum::http::StatusCode> {
+) -> Result<Json<Vec<TimeSeriesPoint>>, StatusCode> {
     let (start, end) = resolve_time_range(&pool, params.from, params.to).await?;
 
     let interval = format!("{} seconds", calculate_bucket_interval(&start, &end));
@@ -75,7 +101,7 @@ async fn get_songs_over_time(
         .await
         .map_err(|e| {
             error!("songs db error: {}", e);
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR
+            StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
     Ok(Json(points))
@@ -84,7 +110,7 @@ async fn get_songs_over_time(
 async fn get_users_over_time(
     State(pool): State<PgPool>,
     Query(params): Query<StatsQuery>,
-) -> Result<Json<Vec<TimeSeriesPoint>>, axum::http::StatusCode> {
+) -> Result<Json<Vec<TimeSeriesPoint>>, StatusCode> {
     let (start, end) = resolve_time_range(&pool, params.from, params.to).await?;
 
     let interval = format!("{} seconds", calculate_bucket_interval(&start, &end));
@@ -93,7 +119,7 @@ async fn get_users_over_time(
         .await
         .map_err(|e| {
             error!("users db error: {}", e);
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR
+            StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
     Ok(Json(points))
@@ -102,10 +128,10 @@ async fn get_users_over_time(
 async fn get_os_distribution(
     State(pool): State<PgPool>,
     Query(_): Query<StatsQuery>,
-) -> Result<Json<Vec<DistributionPoint>>, axum::http::StatusCode> {
+) -> Result<Json<Vec<DistributionPoint>>, StatusCode> {
     let stats = db::telemetry::os_distribution(&pool).await.map_err(|e| {
         error!("os stats error: {}", e);
-        axum::http::StatusCode::INTERNAL_SERVER_ERROR
+        StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
     Ok(Json(stats))
@@ -114,12 +140,12 @@ async fn get_os_distribution(
 async fn get_version_distribution(
     State(pool): State<PgPool>,
     Query(_): Query<StatsQuery>,
-) -> Result<Json<Vec<DistributionPoint>>, axum::http::StatusCode> {
+) -> Result<Json<Vec<DistributionPoint>>, StatusCode> {
     let stats = db::telemetry::version_distribution(&pool)
         .await
         .map_err(|e| {
             error!("version stats error: {}", e);
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR
+            StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
     Ok(Json(stats))

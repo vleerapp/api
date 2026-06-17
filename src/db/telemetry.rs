@@ -1,5 +1,6 @@
 use sqlx::PgPool;
 use time::OffsetDateTime;
+use uuid::Uuid;
 
 use crate::models::telemetry::{DistributionPoint, TelemetrySubmission, TimeSeriesPoint};
 
@@ -20,6 +21,33 @@ pub async fn insert_submission(
     .execute(pool)
     .await?;
     Ok(())
+}
+
+pub async fn daily_submission_count(pool: &PgPool, user_id: Uuid) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT COUNT(*)::BIGINT FROM telemetry WHERE user_id = $1 AND time >= date_trunc('day', NOW())",
+    )
+    .bind(user_id)
+    .fetch_one(pool)
+    .await
+}
+
+pub struct LastSubmission {
+    pub song_count: i64,
+    pub os: String,
+}
+
+pub async fn last_submission(
+    pool: &PgPool,
+    user_id: Uuid,
+) -> Result<Option<LastSubmission>, sqlx::Error> {
+    sqlx::query_as!(
+        LastSubmission,
+        "SELECT song_count, os FROM telemetry WHERE user_id = $1 ORDER BY time DESC LIMIT 1",
+        user_id
+    )
+    .fetch_optional(pool)
+    .await
 }
 
 pub async fn earliest_time(pool: &PgPool) -> Result<Option<OffsetDateTime>, sqlx::Error> {
