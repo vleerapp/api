@@ -1,10 +1,19 @@
 use axum::{Json, Router, extract::State, http::StatusCode, response::IntoResponse, routing::get};
+use regex::Regex;
 use reqwest::Client;
 use serde_json::{Map, Value, json};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use tokio::time::timeout;
+
+static SEMVER_RE: OnceLock<Regex> = OnceLock::new();
+
+fn is_semver(v: &str) -> bool {
+    SEMVER_RE
+        .get_or_init(|| Regex::new(r"^\d+\.\d+\.\d+$").unwrap())
+        .is_match(v)
+}
 
 const REPO: &str = "vleerapp/vleer";
 const S3_BASE: &str = "https://vleer-releases.objects.eplg.cloud";
@@ -103,14 +112,10 @@ async fn update_handler(State(state): State<UpdateState>) -> impl IntoResponse {
 
     {
         let cache = state.cache.read().await;
-        if cache
-            .last_checked
-            .is_some_and(|t| t.elapsed() < GITHUB_TTL)
-        {
+        if cache.last_checked.is_some_and(|t| t.elapsed() < GITHUB_TTL) {
             return match &cache.entry {
                 Some((_, release, platforms)) => serve_response(release, platforms),
-                None => error_response(StatusCode::NOT_FOUND, "No releases found")
-                    .into_response(),
+                None => error_response(StatusCode::NOT_FOUND, "No releases found").into_response(),
             };
         }
     }
@@ -138,8 +143,10 @@ async fn update_handler(State(state): State<UpdateState>) -> impl IntoResponse {
         Ok(resp) if resp.status() == reqwest::StatusCode::NOT_MODIFIED => {
             let mut cache = state.cache.write().await;
             cache.last_checked = Some(Instant::now());
-            let (_, release, platforms) = cache.entry.as_ref().unwrap();
-            serve_response(release, platforms)
+            match &cache.entry {
+                Some((_, release, platforms)) => serve_response(release, platforms),
+                None => error_response(StatusCode::NOT_FOUND, "No releases found").into_response(),
+            }
         }
         Ok(resp) if resp.status().is_success() => {
             let new_etag = resp
@@ -161,11 +168,14 @@ async fn update_handler(State(state): State<UpdateState>) -> impl IntoResponse {
                 }
             };
 
-            let tag = release.get("tag_name").and_then(Value::as_str).unwrap_or("");
+            let tag = release
+                .get("tag_name")
+                .and_then(Value::as_str)
+                .unwrap_or("");
             let version = tag.strip_prefix('v').unwrap_or(tag);
-            if version.is_empty() {
+            if !is_semver(version) {
                 state.cache.write().await.last_checked = Some(Instant::now());
-                return error_response(StatusCode::BAD_GATEWAY, "Release missing version")
+                return error_response(StatusCode::BAD_GATEWAY, "Release missing valid version")
                     .into_response();
             }
 
