@@ -97,12 +97,7 @@ async fn fetch_platforms(client: Client, version: &str) -> Map<String, Value> {
             .get(reqwest::header::CONTENT_LENGTH)
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.parse::<u64>().ok());
-        let etag = resp
-            .headers()
-            .get(reqwest::header::ETAG)
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string());
-        platforms.insert(key, json!({ "url": url, "size": size, "etag": etag }));
+        platforms.insert(key, json!({ "url": url, "size": size }));
     }
     platforms
 }
@@ -179,7 +174,7 @@ async fn update_handler(State(state): State<UpdateState>) -> impl IntoResponse {
                     .into_response();
             }
 
-            let platforms = fetch_platforms(client.clone(), version).await;
+            let platforms = fetch_platforms(client.clone(), &version).await;
 
             let mut cache = state.cache.write().await;
             cache.last_checked = Some(Instant::now());

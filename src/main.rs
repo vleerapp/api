@@ -42,11 +42,10 @@ async fn main() {
     });
     let scrape_pool = match sqlx::postgres::PgPoolOptions::new()
         .max_connections(5)
-        .connect(&scrape_db_url)
-        .await
+        .connect_lazy(&scrape_db_url)
     {
         Ok(p) => {
-            info!("scrape database pool created");
+            info!("scrape database pool created (lazy)");
             Some(p)
         }
         Err(e) => {
@@ -63,33 +62,35 @@ async fn main() {
     let search_client = match SearchClient::new(&es_url) {
         Ok(client) => {
             info!("manticore client created, connecting to {}", es_url);
-            let client = Arc::new(client);
-            if let Err(e) = client.create_index().await {
-                error!("failed to create manticore table: {}", e);
-            } else {
-                match client.count().await {
-                    Ok(count) => info!("manticore ready, indexed documents: {}", count),
-                    Err(e) => info!("manticore ready, could not get count: {}", e),
-                }
-            }
-            let ping_client = client.clone();
-            tokio::spawn(async move {
-                let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
-                loop {
-                    interval.tick().await;
-                    if let Err(e) = ping_client.ping().await {
-                        tracing::warn!("manticore keepalive failed: {}", e);
-                    }
-                }
-            });
-
-            client
+            Arc::new(client)
         }
         Err(e) => {
             error!("failed to create manticore client: {}", e);
             std::process::exit(1);
         }
     };
+
+    {
+        let init_client = search_client.clone();
+        tokio::spawn(async move {
+            if let Err(e) = init_client.create_index().await {
+                error!("failed to create manticore table: {}", e);
+            } else {
+                match init_client.count().await {
+                    Ok(count) => info!("manticore ready, indexed documents: {}", count),
+                    Err(e) => info!("manticore ready, could not get count: {}", e),
+                }
+            }
+            let ping_client = init_client.clone();
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+            loop {
+                interval.tick().await;
+                if let Err(e) = ping_client.ping().await {
+                    tracing::warn!("manticore keepalive failed: {}", e);
+                }
+            }
+        });
+    }
 
     let cors_origins: Vec<HeaderValue> = std::env::var("ALLOWED_ORIGINS")
         .unwrap_or_default()
