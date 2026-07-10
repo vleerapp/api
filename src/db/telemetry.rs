@@ -32,6 +32,7 @@ pub async fn daily_submission_count(pool: &PgPool, user_id: Uuid) -> Result<i64,
     .await
 }
 
+#[derive(sqlx::FromRow)]
 pub struct LastSubmission {
     pub song_count: i64,
     pub os: String,
@@ -41,11 +42,10 @@ pub async fn last_submission(
     pool: &PgPool,
     user_id: Uuid,
 ) -> Result<Option<LastSubmission>, sqlx::Error> {
-    sqlx::query_as!(
-        LastSubmission,
+    sqlx::query_as::<_, LastSubmission>(
         "SELECT song_count, os FROM telemetry WHERE user_id = $1 ORDER BY time DESC LIMIT 1",
-        user_id
     )
+    .bind(user_id)
     .fetch_optional(pool)
     .await
 }
