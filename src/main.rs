@@ -89,7 +89,10 @@ async fn main() {
                 match ping_client.ping().await {
                     Err(e) if !down => {
                         down = true;
-                        tracing::warn!("manticore keepalive failed, silencing until it recovers: {}", e);
+                        tracing::warn!(
+                            "manticore keepalive failed, silencing until it recovers: {}",
+                            e
+                        );
                     }
                     Err(e) => tracing::debug!("manticore keepalive still failing: {}", e),
                     Ok(()) if down => {
