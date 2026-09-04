@@ -4,6 +4,7 @@ use sqlx::PgPool;
 use std::sync::Arc;
 
 pub mod metadata;
+pub mod releases;
 pub mod telemetry;
 pub mod update;
 pub mod validation;
@@ -16,6 +17,7 @@ pub fn app_router(
     let mut router = Router::new()
         .nest("/telemetry", telemetry::router().with_state(pool))
         .nest("/update", update::router())
+        .nest("/releases", releases::router())
         .route("/", any(|_: Request<Body>| async { "Healthy" }));
 
     if let Some(pool) = scrape_pool {
