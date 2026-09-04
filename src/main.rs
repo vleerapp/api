@@ -83,10 +83,20 @@ async fn main() {
             }
             let ping_client = init_client.clone();
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+            let mut down = false;
             loop {
                 interval.tick().await;
-                if let Err(e) = ping_client.ping().await {
-                    tracing::warn!("manticore keepalive failed: {}", e);
+                match ping_client.ping().await {
+                    Err(e) if !down => {
+                        down = true;
+                        tracing::warn!("manticore keepalive failed, silencing until it recovers: {}", e);
+                    }
+                    Err(e) => tracing::debug!("manticore keepalive still failing: {}", e),
+                    Ok(()) if down => {
+                        down = false;
+                        info!("manticore keepalive recovered");
+                    }
+                    Ok(()) => {}
                 }
             }
         });
