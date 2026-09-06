@@ -1,7 +1,7 @@
-pub mod releases;
+pub mod downloads;
 
 use axum::Router;
 
 pub fn router() -> Router {
-    releases::router()
+    downloads::router()
 }

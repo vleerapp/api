@@ -15,11 +15,13 @@ use tokio::sync::RwLock;
 use tokio::time::timeout;
 
 static SEMVER_RE: OnceLock<Regex> = OnceLock::new();
+static SEMVER_PRERELEASE_RE: OnceLock<Regex> = OnceLock::new();
 static CONTENTS_RE: OnceLock<Regex> = OnceLock::new();
 static KEY_RE: OnceLock<Regex> = OnceLock::new();
 
 const S3_BASE: &str = "https://vleer-releases.objects.eplg.cloud";
 const RELEASE_PREFIX: &str = "release";
+const NIGHTLY_PREFIX: &str = "nightly";
 const OSES: [(&str, &str); 3] = [("macos", "dmg"), ("windows", "msi"), ("linux", "AppImage")];
 const ARCHES: [&str; 2] = ["aarch64", "x86_64"];
 const S3_TIMEOUT: Duration = Duration::from_secs(5);
@@ -42,28 +44,31 @@ struct ReleaseEntry {
 struct ReleaseQuery {
     os: String,
     arch: String,
+    nightly: Option<bool>,
 }
 
 #[derive(Clone)]
-struct ReleasesState {
+struct DownloadsState {
     client: Client,
     cache: Arc<RwLock<Cache>>,
 }
 
 #[derive(Default)]
 struct Cache {
-    entry: Option<Arc<ReleaseEntry>>,
-    checked: Option<Instant>,
+    stable_entry: Option<Arc<ReleaseEntry>>,
+    stable_checked: Option<Instant>,
+    nightly_entry: Option<Arc<ReleaseEntry>>,
+    nightly_checked: Option<Instant>,
 }
 
 pub fn router() -> Router {
-    let state = ReleasesState {
+    let state = DownloadsState {
         client: Client::new(),
         cache: Arc::new(RwLock::new(Cache::default())),
     };
     Router::new()
-        .route("/v1", get(releases_handler))
-        .route("/v1/", get(releases_handler))
+        .route("/v1", get(downloads_handler))
+        .route("/v1/", get(downloads_handler))
         .with_state(state)
 }
 
@@ -78,6 +83,14 @@ fn error_response(status: StatusCode, message: &str) -> Response {
 fn is_semver(v: &str) -> bool {
     SEMVER_RE
         .get_or_init(|| Regex::new(r"^\d+\.\d+\.\d+$").unwrap())
+        .is_match(v)
+}
+
+fn is_semver_prerelease(v: &str) -> bool {
+    SEMVER_PRERELEASE_RE
+        .get_or_init(|| {
+            Regex::new(r"^\d+\.\d+\.\d+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$").unwrap()
+        })
         .is_match(v)
 }
 
@@ -114,8 +127,8 @@ fn normalize_arch(arch: &str) -> Option<&'static str> {
     ARCHES.into_iter().find(|a| *a == arch)
 }
 
-async fn releases_handler(
-    State(state): State<ReleasesState>,
+async fn downloads_handler(
+    State(state): State<DownloadsState>,
     Query(query): Query<ReleaseQuery>,
 ) -> Response {
     let Some((os, _)) = normalize_os(&query.os) else {
@@ -131,7 +144,8 @@ async fn releases_handler(
         );
     };
 
-    let entry = match latest_release(&state).await {
+    let nightly = query.nightly.unwrap_or(false);
+    let entry = match latest_release(&state, nightly).await {
         Ok(entry) => entry,
         Err(message) => return error_response(StatusCode::BAD_GATEWAY, &message),
     };
@@ -161,62 +175,108 @@ async fn releases_handler(
         .into_response()
 }
 
-async fn latest_release(state: &ReleasesState) -> Result<Arc<ReleaseEntry>, String> {
+async fn latest_release(
+    state: &DownloadsState,
+    nightly: bool,
+) -> Result<Arc<ReleaseEntry>, String> {
+    let prefix = if nightly {
+        NIGHTLY_PREFIX
+    } else {
+        RELEASE_PREFIX
+    };
+    let not_found = if nightly {
+        "No nightly releases found"
+    } else {
+        "No releases found"
+    };
+    let fail_message = if nightly {
+        "Failed to list nightly releases"
+    } else {
+        "Failed to list releases"
+    };
+
     {
         let cache = state.cache.read().await;
-        if cache.checked.is_some_and(|t| t.elapsed() < CACHE_TTL) {
-            return cache
-                .entry
-                .clone()
-                .ok_or_else(|| "No releases found".to_string());
+        let (checked, entry) = if nightly {
+            (cache.nightly_checked, &cache.nightly_entry)
+        } else {
+            (cache.stable_checked, &cache.stable_entry)
+        };
+        if checked.is_some_and(|t| t.elapsed() < CACHE_TTL) {
+            return entry.clone().ok_or_else(|| not_found.to_string());
         }
     }
 
-    let url = format!("{S3_BASE}/?list-type=2&prefix={RELEASE_PREFIX}/");
+    let url = format!("{S3_BASE}/?list-type=2&prefix={prefix}/");
     let listing = match timeout(S3_TIMEOUT, state.client.get(&url).send()).await {
         Ok(Ok(resp)) if resp.status().is_success() => resp.text().await.map_err(|e| {
             tracing::error!("releases: failed to read listing: {}", e);
-            "Failed to list releases".to_string()
+            fail_message.to_string()
         }),
         Ok(Ok(resp)) => {
             tracing::error!("releases: listing returned {}", resp.status());
-            Err("Failed to list releases".to_string())
+            Err(fail_message.to_string())
         }
         Ok(Err(e)) => {
             tracing::error!("releases: listing request failed: {}", e);
-            Err("Failed to list releases".to_string())
+            Err(fail_message.to_string())
         }
         Err(_) => {
             tracing::error!("releases: listing request timed out");
-            Err("Failed to list releases".to_string())
+            Err(fail_message.to_string())
         }
     };
 
     let body = match listing {
         Ok(body) if body.len() > MAX_LISTING_BYTES => {
             tracing::error!("releases: listing too large ({} bytes)", body.len());
-            return stale(state, "Failed to list releases").await;
+            return stale(state, nightly, fail_message).await;
         }
         Ok(body) => body,
-        Err(message) => return stale(state, &message).await,
+        Err(message) => return stale(state, nightly, &message).await,
     };
 
+    let entry = entry_from_listing(&body, prefix, nightly).map(Arc::new);
     let mut cache = state.cache.write().await;
-    cache.checked = Some(Instant::now());
-    cache.entry = entry_from_listing(&body).map(Arc::new);
-    cache
-        .entry
-        .clone()
-        .ok_or_else(|| "No releases found".to_string())
+    if nightly {
+        cache.nightly_checked = Some(Instant::now());
+        cache.nightly_entry = entry;
+        cache
+            .nightly_entry
+            .clone()
+            .ok_or_else(|| not_found.to_string())
+    } else {
+        cache.stable_checked = Some(Instant::now());
+        cache.stable_entry = entry;
+        cache
+            .stable_entry
+            .clone()
+            .ok_or_else(|| not_found.to_string())
+    }
 }
 
-async fn stale(state: &ReleasesState, message: &str) -> Result<Arc<ReleaseEntry>, String> {
+async fn stale(
+    state: &DownloadsState,
+    nightly: bool,
+    message: &str,
+) -> Result<Arc<ReleaseEntry>, String> {
     let mut cache = state.cache.write().await;
-    cache.checked = Some(Instant::now());
-    cache.entry.clone().ok_or_else(|| message.to_string())
+    if nightly {
+        cache.nightly_checked = Some(Instant::now());
+        cache
+            .nightly_entry
+            .clone()
+            .ok_or_else(|| message.to_string())
+    } else {
+        cache.stable_checked = Some(Instant::now());
+        cache
+            .stable_entry
+            .clone()
+            .ok_or_else(|| message.to_string())
+    }
 }
 
-fn entry_from_listing(xml: &str) -> Option<ReleaseEntry> {
+fn entry_from_listing(xml: &str, prefix: &str, nightly: bool) -> Option<ReleaseEntry> {
     let contents =
         CONTENTS_RE.get_or_init(|| Regex::new(r"(?s)<Contents>(.*?)</Contents>").unwrap());
 
@@ -227,7 +287,7 @@ fn entry_from_listing(xml: &str) -> Option<ReleaseEntry> {
         let Some(key) = field(block, &KEY_RE, r"<Key>([^<]*)</Key>") else {
             continue;
         };
-        let Some(rest) = key.strip_prefix(&format!("{RELEASE_PREFIX}/Vleer-")) else {
+        let Some(rest) = key.strip_prefix(&format!("{prefix}/Vleer-")) else {
             continue;
         };
         for (os, extension) in OSES {
@@ -241,7 +301,12 @@ fn entry_from_listing(xml: &str) -> Option<ReleaseEntry> {
                 continue;
             };
             let version = &rest[..rest.len() - arch.len() - 1];
-            if version.len() > MAX_VERSION_LEN || !is_semver(version) {
+            let valid = if nightly {
+                is_semver_prerelease(version)
+            } else {
+                is_semver(version)
+            };
+            if version.len() > MAX_VERSION_LEN || !valid {
                 continue;
             }
             assets.push(Asset {
