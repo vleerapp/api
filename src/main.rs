@@ -38,6 +38,7 @@ async fn main() {
     info!("database initialized and migrations applied");
 
     let scrape_db_url = std::env::var("SCRAPE_DATABASE_URL").unwrap_or_else(|_| {
+        tracing::warn!("SCRAPE_DATABASE_URL not set, falling back to localhost:5432");
         "postgres://postgres:postgres@localhost:5432/apple_music_scrape".to_string()
     });
     let scrape_pool = match sqlx::postgres::PgPoolOptions::new()
