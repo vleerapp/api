@@ -48,9 +48,6 @@ async fn submit_telemetry(
             if last.os != payload.os.as_str() {
                 return StatusCode::UNPROCESSABLE_ENTITY;
             }
-            if last.song_count > 100 && payload.song_count < last.song_count / 2 {
-                return StatusCode::UNPROCESSABLE_ENTITY;
-            }
         }
         Err(e) => {
             error!("last submission error: {}", e);
