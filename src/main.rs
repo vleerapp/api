@@ -41,10 +41,14 @@ async fn main() {
         tracing::warn!("SCRAPE_DATABASE_URL not set, falling back to localhost:5432");
         "postgres://postgres:postgres@localhost:5432/apple_music_scrape".to_string()
     });
-    let scrape_pool = match sqlx::postgres::PgPoolOptions::new()
-        .max_connections(5)
-        .connect_lazy(&scrape_db_url)
-    {
+    let scrape_pool = match scrape_db_url
+        .parse::<sqlx::postgres::PgConnectOptions>()
+        .map(|opts| {
+            sqlx::postgres::PgPoolOptions::new()
+                .max_connections(8)
+                .acquire_timeout(std::time::Duration::from_secs(5))
+                .connect_lazy_with(opts.options([("statement_timeout", "10000")]))
+        }) {
         Ok(p) => {
             info!("scrape database pool created (lazy)");
             Some(p)

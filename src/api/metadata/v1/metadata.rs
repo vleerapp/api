@@ -4,6 +4,7 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
+use futures::stream::{self, StreamExt};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sqlx::PgPool;
@@ -13,7 +14,7 @@ use crate::api::metadata::v1::resource::{
     parse_includes, render_album, render_artist, render_song,
 };
 use crate::db;
-use crate::manticore::SearchClient;
+use crate::manticore::{SearchClient, SearchError};
 
 #[derive(Clone)]
 pub struct SearchState {
@@ -23,6 +24,7 @@ pub struct SearchState {
 
 const MAX_LOOKUP_VALUES: usize = 100;
 const MATCH_CANDIDATES: i32 = 50;
+const CATALOG_FETCH_CONCURRENCY: usize = 4;
 
 fn best_jw(candidate_joined: &str, query: &str) -> f64 {
     let q = query.to_lowercase();
@@ -89,6 +91,18 @@ fn error_response(status: StatusCode, message: &str) -> (StatusCode, Json<Value>
     )
 }
 
+fn db_error_response(e: &sqlx::Error, context: &str, message: &str) -> (StatusCode, Json<Value>) {
+    tracing::error!("{}: {}", context, e);
+    let status = match e {
+        sqlx::Error::PoolTimedOut | sqlx::Error::Io(_) => StatusCode::SERVICE_UNAVAILABLE,
+        sqlx::Error::Database(d) if d.code().as_deref() == Some("57014") => {
+            StatusCode::GATEWAY_TIMEOUT
+        }
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    error_response(status, message)
+}
+
 fn split_values(raw: &str) -> Vec<String> {
     raw.split(',')
         .map(|s| s.trim().to_string())
@@ -124,10 +138,7 @@ async fn stats_handler(State(state): State<SearchState>) -> impl IntoResponse {
                 "stats": { "songs": songs, "albums": albums, "artists": artists }
             })),
         ),
-        Err(e) => {
-            tracing::error!("stats error: {}", e);
-            error_response(StatusCode::INTERNAL_SERVER_ERROR, "Failed to load stats")
-        }
+        Err(e) => db_error_response(&e, "stats error", "Failed to load stats"),
     }
 }
 
@@ -197,9 +208,7 @@ async fn catalog_collection_handler(
         match db::metadata::song_ids_by_isrc(&state.scrape_pool, &values).await {
             Ok(ids) => ids.into_iter().map(|id| ("song".to_string(), id)).collect(),
             Err(e) => {
-                tracing::error!("lookup error: {}", e);
-                return error_response(StatusCode::INTERNAL_SERVER_ERROR, "Lookup failed")
-                    .into_response();
+                return db_error_response(&e, "lookup error", "Lookup failed").into_response();
             }
         }
     } else {
@@ -214,22 +223,28 @@ async fn catalog_collection_handler(
                 .map(|id| ("album".to_string(), id))
                 .collect(),
             Err(e) => {
-                tracing::error!("lookup error: {}", e);
-                return error_response(StatusCode::INTERNAL_SERVER_ERROR, "Lookup failed")
-                    .into_response();
+                return db_error_response(&e, "lookup error", "Lookup failed").into_response();
             }
         }
     };
 
-    let mut data: Vec<Value> = Vec::new();
-    for (item_type, id) in resolved {
-        match fetch_resource(&state, &item_type, &id, &include).await {
+    let results: Vec<_> = stream::iter(resolved)
+        .map(|(item_type, id)| {
+            let state = &state;
+            let include = &include;
+            async move { fetch_resource(state, &item_type, &id, include).await }
+        })
+        .buffered(CATALOG_FETCH_CONCURRENCY)
+        .collect()
+        .await;
+
+    let mut data: Vec<Value> = Vec::with_capacity(results.len());
+    for result in results {
+        match result {
             Ok(Some(resource)) => data.push(resource),
             Ok(None) => {}
             Err(e) => {
-                tracing::error!("lookup error: {}", e);
-                return error_response(StatusCode::INTERNAL_SERVER_ERROR, "Lookup failed")
-                    .into_response();
+                return db_error_response(&e, "lookup error", "Lookup failed").into_response();
             }
         }
     }
@@ -252,10 +267,7 @@ async fn catalog_single_handler(
     match fetch_resource(&state, &item_type, &id, &include).await {
         Ok(Some(resource)) => (StatusCode::OK, Json(json!({ "data": resource }))).into_response(),
         Ok(None) => error_response(StatusCode::NOT_FOUND, "Resource not found").into_response(),
-        Err(e) => {
-            tracing::error!("lookup error: {}", e);
-            error_response(StatusCode::INTERNAL_SERVER_ERROR, "Lookup failed").into_response()
-        }
+        Err(e) => db_error_response(&e, "lookup error", "Lookup failed").into_response(),
     }
 }
 
@@ -296,8 +308,12 @@ async fn identify_handler(
         Ok(result) => result,
         Err(e) => {
             tracing::error!("match error: {}", e);
-            return error_response(StatusCode::INTERNAL_SERVER_ERROR, "Match failed")
-                .into_response();
+            let status = match e {
+                SearchError::Overloaded => StatusCode::SERVICE_UNAVAILABLE,
+                SearchError::Timeout => StatusCode::GATEWAY_TIMEOUT,
+                SearchError::Failed(_) => StatusCode::BAD_GATEWAY,
+            };
+            return error_response(status, "Match failed").into_response();
         }
     };
 
@@ -320,9 +336,6 @@ async fn identify_handler(
     match result {
         Ok(Some(resource)) => (StatusCode::OK, Json(json!({ "data": resource }))).into_response(),
         Ok(None) => error_response(StatusCode::NOT_FOUND, "No match found").into_response(),
-        Err(e) => {
-            tracing::error!("match error: {}", e);
-            error_response(StatusCode::INTERNAL_SERVER_ERROR, "Match failed").into_response()
-        }
+        Err(e) => db_error_response(&e, "match error", "Match failed").into_response(),
     }
 }

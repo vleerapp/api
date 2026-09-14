@@ -1,16 +1,40 @@
 use anyhow::{Result, anyhow};
 use reqwest::Client;
+use std::time::Duration;
+use tokio::sync::Semaphore;
+
+const MAX_CONCURRENT_SEARCHES: usize = 4;
+const SEARCH_QUEUE_TIMEOUT: Duration = Duration::from_secs(3);
+const MAX_QUERY_TIME_MS: u64 = 8_000;
+
+#[derive(Debug)]
+pub enum SearchError {
+    Overloaded,
+    Timeout,
+    Failed(anyhow::Error),
+}
+
+impl std::fmt::Display for SearchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SearchError::Overloaded => write!(f, "search overloaded"),
+            SearchError::Timeout => write!(f, "search timed out"),
+            SearchError::Failed(e) => write!(f, "{e:#}"),
+        }
+    }
+}
 
 pub struct SearchClient {
     http: Client,
     url: String,
     index_name: String,
+    permits: Semaphore,
 }
 
 impl SearchClient {
     pub fn new(manticore_url: &str) -> Result<Self> {
         let http = Client::builder()
-            .timeout(std::time::Duration::from_secs(10))
+            .timeout(Duration::from_millis(MAX_QUERY_TIME_MS + 2_000))
             .connect_timeout(std::time::Duration::from_secs(5))
             .tcp_keepalive(std::time::Duration::from_secs(30))
             .pool_idle_timeout(std::time::Duration::from_secs(90))
@@ -20,6 +44,7 @@ impl SearchClient {
             http,
             url: manticore_url.trim_end_matches('/').to_string(),
             index_name: "music".to_string(),
+            permits: Semaphore::new(MAX_CONCURRENT_SEARCHES),
         })
     }
 
@@ -83,14 +108,10 @@ impl SearchClient {
             .post(format!("{}/search", self.url))
             .json(&body)
             .send()
-            .await
-            .map_err(|e| anyhow!("manticore request failed: {e}"))?;
+            .await?;
 
         let status = resp.status();
-        let text = resp
-            .text()
-            .await
-            .map_err(|e| anyhow!("failed to read manticore response: {e}"))?;
+        let text = resp.text().await?;
 
         if !status.is_success() {
             return Err(anyhow!("manticore error {status}: {text}"));
@@ -127,7 +148,12 @@ impl SearchClient {
         album: Option<&str>,
         limit: i32,
         offset: i32,
-    ) -> Result<Vec<(String, String, String, String)>> {
+    ) -> Result<Vec<(String, String, String, String)>, SearchError> {
+        let _permit = tokio::time::timeout(SEARCH_QUEUE_TIMEOUT, self.permits.acquire())
+            .await
+            .map_err(|_| SearchError::Overloaded)?
+            .map_err(|e| SearchError::Failed(e.into()))?;
+
         let mut must: Vec<serde_json::Value> =
             vec![serde_json::json!({ "equals": { "item_type": item_type } })];
         if let Some(n) = name {
@@ -151,12 +177,21 @@ impl SearchClient {
         let body = serde_json::json!({
             "index": self.index_name,
             "query": query,
-            "source": ["doc_id", "name", "artist_name", "album_name"],
+            "_source": ["doc_id", "name", "artist_name", "album_name"],
             "limit": limit,
             "offset": offset,
+            "options": { "max_query_time": MAX_QUERY_TIME_MS },
         });
 
-        let response = self.search_json(body).await?;
+        let response = self.search_json(body).await.map_err(|e| {
+            if e.downcast_ref::<reqwest::Error>()
+                .is_some_and(|r| r.is_timeout())
+            {
+                SearchError::Timeout
+            } else {
+                SearchError::Failed(e)
+            }
+        })?;
 
         let empty_vec: Vec<serde_json::Value> = vec![];
         let hits = response["hits"]["hits"].as_array().unwrap_or(&empty_vec);
