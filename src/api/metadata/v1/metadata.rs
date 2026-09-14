@@ -59,7 +59,7 @@ pub struct IncludeQuery {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct LookupQuery {
+pub struct CatalogQuery {
     pub ids: Option<String>,
     pub isrc: Option<String>,
     pub upc: Option<String>,
@@ -67,7 +67,7 @@ pub struct LookupQuery {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct MatchQuery {
+pub struct IdentifyQuery {
     pub name: Option<String>,
     pub album: Option<String>,
     pub artist: Option<String>,
@@ -77,9 +77,9 @@ pub struct MatchQuery {
 pub fn router() -> Router<SearchState> {
     Router::new()
         .route("/", axum::routing::get(stats_handler))
-        .route("/lookup", axum::routing::get(lookup_collection_handler))
-        .route("/lookup/{id}", axum::routing::get(lookup_single_handler))
-        .route("/match/{type}", axum::routing::get(match_handler))
+        .route("/catalog", axum::routing::get(catalog_collection_handler))
+        .route("/catalog/{id}", axum::routing::get(catalog_single_handler))
+        .route("/identify/{type}", axum::routing::get(identify_handler))
 }
 
 fn error_response(status: StatusCode, message: &str) -> (StatusCode, Json<Value>) {
@@ -151,9 +151,9 @@ async fn fetch_resource(
     })
 }
 
-async fn lookup_collection_handler(
+async fn catalog_collection_handler(
     State(state): State<SearchState>,
-    Query(params): Query<LookupQuery>,
+    Query(params): Query<CatalogQuery>,
 ) -> impl IntoResponse {
     let ids = params.ids.as_deref().filter(|s| !s.is_empty());
     let isrc = params.isrc.as_deref().filter(|s| !s.is_empty());
@@ -237,7 +237,7 @@ async fn lookup_collection_handler(
     (StatusCode::OK, Json(json!({ "data": data }))).into_response()
 }
 
-async fn lookup_single_handler(
+async fn catalog_single_handler(
     State(state): State<SearchState>,
     Path(raw_id): Path<String>,
     Query(params): Query<IncludeQuery>,
@@ -259,10 +259,10 @@ async fn lookup_single_handler(
     }
 }
 
-async fn match_handler(
+async fn identify_handler(
     State(state): State<SearchState>,
     Path(item_type): Path<String>,
-    Query(params): Query<MatchQuery>,
+    Query(params): Query<IdentifyQuery>,
 ) -> impl IntoResponse {
     if !matches!(item_type.as_str(), "song" | "album" | "artist") {
         return error_response(StatusCode::BAD_REQUEST, "Invalid type").into_response();
