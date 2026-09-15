@@ -7,12 +7,9 @@ services:
     environment:
       - DATABASE_URL=postgres://postgres:postgres@postgres:5432/vleer_api
       - SCRAPE_DATABASE_URL=postgres://postgres:postgres@localhost:5432/apple_music_scrape
-      - MANTICORE_URL=http://manticore:9308
       - RUST_LOG=info
     depends_on:
       postgres:
-        condition: service_healthy
-      manticore:
         condition: service_healthy
     networks:
       - vleer_api-network
@@ -45,31 +42,8 @@ services:
       retries: 5
       start_period: 10s
 
-  manticore:
-    image: manticoresearch/manticore:7.0.0
-    container_name: manticore
-    restart: unless-stopped
-    environment:
-      - MANTICORE_CONFIG=/etc/manticoresearch/manticore.conf
-    ports:
-      - "9308:9308"
-      - "9312:9312"
-      - "9313:9313"
-    volumes:
-      - manticore_data:/var/lib/manticore
-    networks:
-      vleer_api-network:
-        aliases:
-          - manticore
-    healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:9308/sql -d 'mode=raw&query=SELECT 1' || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-
 volumes:
   postgres:
-  manticore_data:
 
 networks:
   vleer_api-network:
