@@ -8,52 +8,20 @@ use futures::stream::{self, StreamExt};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sqlx::PgPool;
-use std::sync::Arc;
 
 use crate::api::metadata::v1::resource::{
     parse_includes, render_album, render_artist, render_song,
 };
-use crate::db;
-use crate::manticore::{SearchClient, SearchError};
+use crate::{db, search};
 
 #[derive(Clone)]
 pub struct SearchState {
-    pub client: Arc<SearchClient>,
     pub scrape_pool: PgPool,
 }
 
 const MAX_LOOKUP_VALUES: usize = 100;
-const MATCH_CANDIDATES: i32 = 50;
+const MATCH_CANDIDATES: i64 = 100;
 const CATALOG_FETCH_CONCURRENCY: usize = 4;
-
-fn best_jw(candidate_joined: &str, query: &str) -> f64 {
-    let q = query.to_lowercase();
-    let c = candidate_joined.to_lowercase();
-    if c.contains(q.as_str()) {
-        return 1.0;
-    }
-    c.split_whitespace()
-        .map(|part| strsim::jaro_winkler(part.trim_matches(','), q.as_str()))
-        .fold(0.0_f64, f64::max)
-}
-
-fn score_candidate(
-    cn: &str,
-    ca: &str,
-    cal: &str,
-    qn: &str,
-    qa: Option<&str>,
-    qal: Option<&str>,
-) -> f64 {
-    let mut score = strsim::jaro_winkler(&cn.to_lowercase(), &qn.to_lowercase()) * 0.6;
-    if let Some(a) = qa {
-        score += best_jw(ca, a) * 0.3;
-    }
-    if let Some(a) = qal {
-        score += best_jw(cal, a) * 0.1;
-    }
-    score
-}
 
 #[derive(Debug, Deserialize)]
 pub struct IncludeQuery {
@@ -95,9 +63,11 @@ fn db_error_response(e: &sqlx::Error, context: &str, message: &str) -> (StatusCo
     tracing::error!("{}: {}", context, e);
     let status = match e {
         sqlx::Error::PoolTimedOut | sqlx::Error::Io(_) => StatusCode::SERVICE_UNAVAILABLE,
-        sqlx::Error::Database(d) if d.code().as_deref() == Some("57014") => {
-            StatusCode::GATEWAY_TIMEOUT
-        }
+        sqlx::Error::Database(d) => match d.code().as_deref() {
+            Some("57014") => StatusCode::GATEWAY_TIMEOUT,
+            Some("42P01" | "42883" | "42704") => StatusCode::SERVICE_UNAVAILABLE,
+            _ => StatusCode::INTERNAL_SERVER_ERROR,
+        },
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     };
     error_response(status, message)
@@ -300,34 +270,23 @@ async fn identify_handler(
         _ => (None, None),
     };
 
-    let candidates = match state
-        .client
-        .search(&item_type, Some(name), artist, album, MATCH_CANDIDATES, 0)
-        .await
+    let candidates = match db::search::candidates(
+        &state.scrape_pool,
+        &item_type,
+        name,
+        artist,
+        MATCH_CANDIDATES,
+    )
+    .await
     {
         Ok(result) => result,
-        Err(e) => {
-            tracing::error!("match error: {}", e);
-            let status = match e {
-                SearchError::Overloaded => StatusCode::SERVICE_UNAVAILABLE,
-                SearchError::Timeout => StatusCode::GATEWAY_TIMEOUT,
-                SearchError::Failed(_) => StatusCode::BAD_GATEWAY,
-            };
-            return error_response(status, "Match failed").into_response();
-        }
+        Err(e) => return db_error_response(&e, "match error", "Match failed").into_response(),
     };
 
-    let Some((matched_id, _, _, _)) =
-        candidates
-            .iter()
-            .max_by(|(_, cn1, ca1, cal1), (_, cn2, ca2, cal2)| {
-                score_candidate(cn1, ca1, cal1, name, artist, album)
-                    .total_cmp(&score_candidate(cn2, ca2, cal2, name, artist, album))
-            })
-    else {
+    let Some(matched) = search::best_match(&candidates, name, artist, album) else {
         return error_response(StatusCode::NOT_FOUND, "No match found").into_response();
     };
-    let matched_id = matched_id.clone();
+    let matched_id = matched.id.clone();
 
     let include = parse_includes(&params.include);
 

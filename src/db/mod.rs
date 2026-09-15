@@ -6,6 +6,7 @@ use std::{env, str::FromStr};
 static DB_NAME_RE: OnceLock<Regex> = OnceLock::new();
 
 pub mod metadata;
+pub mod search;
 pub mod telemetry;
 
 pub async fn create_pool() -> Result<PgPool, sqlx::Error> {

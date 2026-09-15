@@ -31,7 +31,7 @@ pub async fn song_ids_by_isrc(pool: &PgPool, isrcs: &[String]) -> Result<Vec<Str
         return Ok(Vec::new());
     }
     let upper: Vec<String> = isrcs.iter().map(|s| s.to_uppercase()).collect();
-    let rows = sqlx::query("SELECT id FROM songs WHERE UPPER(isrc) = ANY($1) ORDER BY id")
+    let rows = sqlx::query("SELECT id FROM songs WHERE isrc = ANY($1) ORDER BY id")
         .bind(&upper)
         .fetch_all(pool)
         .await?;
@@ -77,7 +77,7 @@ pub async fn get_song_by_id(pool: &PgPool, id: &str) -> Result<Option<Song>, sql
                     json_agg(json_build_object(
                         'id', a.id,
                         'name', a.name,
-                        'image', a.image,
+                        'image', COALESCE(artwork_url(a.image), ''),
                         'genres', COALESCE(to_json(aga.genres), '[]'::json)
                     ) ORDER BY a.name) AS artists_json
                 FROM song_artists sa
@@ -106,7 +106,7 @@ pub async fn get_song_by_id(pool: &PgPool, id: &str) -> Result<Option<Song>, sql
                     json_agg(json_build_object(
                         'id', a.id,
                         'name', a.name,
-                        'image', a.image,
+                        'image', COALESCE(artwork_url(a.image), ''),
                         'genres', COALESCE(to_json(aaga.genres), '[]'::json)
                     ) ORDER BY a.name) AS artists_json
                 FROM artist_albums aa
@@ -136,8 +136,8 @@ pub async fn get_song_by_id(pool: &PgPool, id: &str) -> Result<Option<Song>, sql
                         'name', al.name,
                         'artist', COALESCE(ala.artists_json, '[]'::json),
                         'genres', COALESCE(to_json(alga.genres), '[]'::json),
-                        'image', al.image,
-                        'date', al.date,
+                        'image', COALESCE(artwork_url(al.image), ''),
+                        'date', COALESCE(format_release_date(al.date, al.date_precision), ''),
                         'track_count', al.track_count,
                         'upc', al.upc,
                         'label', al.label
@@ -149,8 +149,14 @@ pub async fn get_song_by_id(pool: &PgPool, id: &str) -> Result<Option<Song>, sql
                 WHERE sal.song_id = $1
                 GROUP BY sal.song_id
             )
-           SELECT s.id, s.name, s.image, s.duration,
-                  s.disc_number, s.track_number, s.isrc, s.date,
+           SELECT s.id, s.name,
+                  COALESCE(artwork_url(s.image), artwork_url((
+                      SELECT al.image FROM song_albums sal JOIN albums al ON al.id = sal.album_id
+                      WHERE sal.song_id = s.id AND al.image IS NOT NULL
+                      ORDER BY al.name, al.id LIMIT 1
+                  )), '') AS image,
+                  s.duration, s.disc_number, s.track_number, s.isrc,
+                  COALESCE(format_release_date(s.date, s.date_precision), '') AS date,
                   artist_agg.artists_json,
                   album_agg.albums_json,
                   COALESCE(song_genres_agg.genres, '{}') AS genres
@@ -189,9 +195,9 @@ pub async fn get_song_by_id(pool: &PgPool, id: &str) -> Result<Option<Song>, sql
         album: albums,
         genres: r.get::<Vec<String>, _>("genres"),
         image: r.get("image"),
-        disc_number: r.get::<i64, _>("disc_number") as i32,
-        track_number: r.get::<i64, _>("track_number") as i32,
-        duration: r.get::<i64, _>("duration") as i32,
+        disc_number: r.get::<i16, _>("disc_number") as i32,
+        track_number: r.get::<i16, _>("track_number") as i32,
+        duration: r.get::<i32, _>("duration"),
         isrc: r.get("isrc"),
         date: r.get("date"),
     }))
@@ -199,7 +205,7 @@ pub async fn get_song_by_id(pool: &PgPool, id: &str) -> Result<Option<Song>, sql
 
 pub async fn get_artist_by_id(pool: &PgPool, id: &str) -> Result<Option<Artist>, sqlx::Error> {
     let row = sqlx::query(
-        r#"SELECT a.id, a.name, a.image,
+        r#"SELECT a.id, a.name, COALESCE(artwork_url(a.image), '') AS image,
                   COALESCE(array_agg(DISTINCT g.name) FILTER (WHERE g.name IS NOT NULL), '{}') AS genres
            FROM artists a
            LEFT JOIN artist_genres ag ON ag.artist_id = a.id
@@ -232,12 +238,13 @@ pub async fn get_album_by_id(pool: &PgPool, id: &str) -> Result<Option<Album>, s
                 )
                 GROUP BY ag.artist_id
             )
-           SELECT al.id, al.name, al.image, al.date,
+           SELECT al.id, al.name, COALESCE(artwork_url(al.image), '') AS image,
+                  COALESCE(format_release_date(al.date, al.date_precision), '') AS date,
                   al.track_count, al.upc, al.label,
                   json_agg(json_build_object(
                       'id', a.id,
                       'name', a.name,
-                      'image', a.image,
+                      'image', COALESCE(artwork_url(a.image), ''),
                       'genres', COALESCE(to_json(aga.genres), '[]'::json)
                   ) ORDER BY a.name) as artists_json,
                   COALESCE(array_agg(DISTINCT g2.name) FILTER (WHERE g2.name IS NOT NULL), '{}') AS genres
@@ -248,7 +255,7 @@ pub async fn get_album_by_id(pool: &PgPool, id: &str) -> Result<Option<Album>, s
            LEFT JOIN album_genres alg ON alg.album_id = al.id
            LEFT JOIN genres g2 ON g2.id = alg.genre_id
            WHERE al.id = $1
-           GROUP BY al.id, al.name, al.image, al.date,
+           GROUP BY al.id, al.name, al.image, al.date, al.date_precision,
                     al.track_count, al.upc, al.label"#,
     )
     .bind(id)
@@ -273,8 +280,8 @@ pub async fn get_album_by_id(pool: &PgPool, id: &str) -> Result<Option<Album>, s
         artist: artists,
         genres: r.get::<Vec<String>, _>("genres"),
         image: r.get("image"),
-        date: r.get::<Option<String>, _>("date").unwrap_or_default(),
-        track_count: r.get::<i64, _>("track_count") as i32,
+        date: r.get("date"),
+        track_count: r.get::<i16, _>("track_count") as i32,
         upc: r.get("upc"),
         label: r.get::<Option<String>, _>("label"),
     }))
