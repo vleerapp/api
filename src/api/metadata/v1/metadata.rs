@@ -59,17 +59,21 @@ fn error_response(status: StatusCode, message: &str) -> (StatusCode, Json<Value>
     )
 }
 
+fn classify_db_error(e: &sqlx::Error) -> Option<StatusCode> {
+    match e {
+        sqlx::Error::PoolTimedOut | sqlx::Error::Io(_) => Some(StatusCode::SERVICE_UNAVAILABLE),
+        sqlx::Error::Database(d) => match d.code().as_deref() {
+            Some("57014") => Some(StatusCode::GATEWAY_TIMEOUT),
+            Some("42P01" | "42883" | "42704") => Some(StatusCode::SERVICE_UNAVAILABLE),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 fn db_error_response(e: &sqlx::Error, context: &str, message: &str) -> (StatusCode, Json<Value>) {
     tracing::error!("{}: {}", context, e);
-    let status = match e {
-        sqlx::Error::PoolTimedOut | sqlx::Error::Io(_) => StatusCode::SERVICE_UNAVAILABLE,
-        sqlx::Error::Database(d) => match d.code().as_deref() {
-            Some("57014") => StatusCode::GATEWAY_TIMEOUT,
-            Some("42P01" | "42883" | "42704") => StatusCode::SERVICE_UNAVAILABLE,
-            _ => StatusCode::INTERNAL_SERVER_ERROR,
-        },
-        _ => StatusCode::INTERNAL_SERVER_ERROR,
-    };
+    let status = classify_db_error(e).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     error_response(status, message)
 }
 
@@ -280,7 +284,14 @@ async fn identify_handler(
     .await
     {
         Ok(result) => result,
-        Err(e) => return db_error_response(&e, "match error", "Match failed").into_response(),
+        Err(e) => {
+            let Some(status) = classify_db_error(&e) else {
+                tracing::warn!("match query error, treating as no match: {}", e);
+                return error_response(StatusCode::NOT_FOUND, "No match found").into_response();
+            };
+            tracing::error!("match error: {}", e);
+            return error_response(status, "Match failed").into_response();
+        }
     };
 
     let Some(matched) = search::best_match(&candidates, name, artist, album) else {
