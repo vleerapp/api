@@ -137,7 +137,7 @@ pub async fn get_song_by_id(pool: &PgPool, id: &str) -> Result<Option<Song>, sql
                         'artist', COALESCE(ala.artists_json, '[]'::json),
                         'genres', COALESCE(to_json(alga.genres), '[]'::json),
                         'image', COALESCE(artwork_url(al.image), ''),
-                        'date', COALESCE(format_release_date(al.date, al.date_precision), ''),
+                        'date', COALESCE(to_char(al.date, 'YYYY-MM-DD'), ''),
                         'track_count', al.track_count,
                         'upc', al.upc,
                         'label', al.label
@@ -156,7 +156,7 @@ pub async fn get_song_by_id(pool: &PgPool, id: &str) -> Result<Option<Song>, sql
                       ORDER BY al.name, al.id LIMIT 1
                   )), '') AS image,
                   s.duration, s.disc_number, s.track_number, s.isrc,
-                  COALESCE(format_release_date(s.date, s.date_precision), '') AS date,
+                  COALESCE(to_char(s.date, 'YYYY-MM-DD'), '') AS date,
                   artist_agg.artists_json,
                   album_agg.albums_json,
                   COALESCE(song_genres_agg.genres, '{}') AS genres
@@ -239,7 +239,7 @@ pub async fn get_album_by_id(pool: &PgPool, id: &str) -> Result<Option<Album>, s
                 GROUP BY ag.artist_id
             )
            SELECT al.id, al.name, COALESCE(artwork_url(al.image), '') AS image,
-                  COALESCE(format_release_date(al.date, al.date_precision), '') AS date,
+                  COALESCE(to_char(al.date, 'YYYY-MM-DD'), '') AS date,
                   al.track_count, al.upc, al.label,
                   json_agg(json_build_object(
                       'id', a.id,
@@ -255,7 +255,7 @@ pub async fn get_album_by_id(pool: &PgPool, id: &str) -> Result<Option<Album>, s
            LEFT JOIN album_genres alg ON alg.album_id = al.id
            LEFT JOIN genres g2 ON g2.id = alg.genre_id
            WHERE al.id = $1
-           GROUP BY al.id, al.name, al.image, al.date, al.date_precision,
+           GROUP BY al.id, al.name, al.image, al.date,
                     al.track_count, al.upc, al.label"#,
     )
     .bind(id)
