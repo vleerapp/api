@@ -8,6 +8,7 @@ use crate::db::search::Candidate;
 const NAME_WEIGHT: f64 = 0.6;
 const ARTIST_WEIGHT: f64 = 0.3;
 const ALBUM_WEIGHT: f64 = 0.1;
+const POPULARITY_WEIGHT: f64 = 0.15;
 
 struct Field {
     query: String,
@@ -46,10 +47,19 @@ impl Field {
         } else if lower.contains(self.query.as_str()) {
             1.0
         } else {
-            lower
+            let words: Vec<&str> = lower
                 .split_whitespace()
-                .map(|part| strsim::jaro_winkler(part.trim_matches(','), &self.query))
-                .fold(0.0, f64::max)
+                .map(|part| part.trim_matches(','))
+                .collect();
+            let n = self.query.split_whitespace().count().max(1);
+            if words.len() <= n {
+                strsim::jaro_winkler(&words.join(" "), &self.query)
+            } else {
+                words
+                    .windows(n)
+                    .map(|w| strsim::jaro_winkler(&w.join(" "), &self.query))
+                    .fold(0.0, f64::max)
+            }
         };
 
         if self.max == 0 {
@@ -77,6 +87,13 @@ pub fn best_match<'a>(
     let artist = artist.map(|a| Field::new(a, &mut matcher, &mut buf));
     let album = album.map(|a| Field::new(a, &mut matcher, &mut buf));
 
+    let max_pop = candidates
+        .iter()
+        .map(|c| c.popularity_score)
+        .max()
+        .unwrap_or(1)
+        .max(1) as f64;
+
     candidates
         .iter()
         .map(|c| {
@@ -87,6 +104,8 @@ pub fn best_match<'a>(
             if let Some(f) = &album {
                 score += f.score(&c.album, false, &mut matcher, &mut buf) * ALBUM_WEIGHT;
             }
+            let pop = ((c.popularity_score as f64 + 1.0).ln() / (max_pop + 1.0).ln()).min(1.0);
+            score += pop * POPULARITY_WEIGHT;
             (c, score)
         })
         .max_by(|(_, a), (_, b)| a.total_cmp(b))
