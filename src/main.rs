@@ -23,16 +23,6 @@ async fn main() {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    if std::env::args().nth(1).as_deref() == Some("search-backfill") {
-        std::process::exit(match run_search_backfill().await {
-            Ok(()) => 0,
-            Err(e) => {
-                error!("search backfill failed: {:#}", e);
-                1
-            }
-        });
-    }
-
     info!("starting vleer api");
 
     let pool = match db::create_pool().await {
@@ -72,21 +62,6 @@ async fn main() {
             None
         }
     };
-
-    if let Some(pool) = &scrape_pool {
-        let pool = pool.clone();
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
-            loop {
-                interval.tick().await;
-                match db::search::sync_recent(&pool).await {
-                    Ok(0) => {}
-                    Ok(n) => info!("search sync: {} rows upserted", n),
-                    Err(e) => warn!("search sync failed: {}", e),
-                }
-            }
-        });
-    }
 
     let cors_origins: Vec<HeaderValue> = std::env::var("ALLOWED_ORIGINS")
         .unwrap_or_default()
@@ -133,26 +108,4 @@ async fn main() {
         error!("server error: {}", e);
         std::process::exit(1);
     }
-}
-
-async fn run_search_backfill() -> anyhow::Result<()> {
-    let url = std::env::var("SCRAPE_DATABASE_URL")?;
-    let concurrency: usize = std::env::var("BACKFILL_CONCURRENCY")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(8);
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(concurrency as u32 + 2)
-        .acquire_timeout(std::time::Duration::from_secs(600))
-        .after_connect(|conn, _| {
-            Box::pin(async move {
-                sqlx::raw_sql("SET max_parallel_workers_per_gather = 0; SET jit = off; SET client_min_messages = error")
-                    .execute(&mut *conn)
-                    .await?;
-                Ok(())
-            })
-        })
-        .connect(&url)
-        .await?;
-    db::search::backfill(&pool, concurrency).await
 }
