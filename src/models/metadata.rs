@@ -21,7 +21,7 @@ pub struct Song {
     #[serde(rename = "track_number")]
     pub track_number: i32,
     pub duration: i32,
-    pub isrc: String,
+    pub isrc: Option<String>,
     pub date: String,
 }
 
@@ -35,6 +35,6 @@ pub struct Album {
     pub date: String,
     #[serde(rename = "track_count")]
     pub track_count: i32,
-    pub upc: String,
+    pub upc: Option<String>,
     pub label: Option<String>,
 }

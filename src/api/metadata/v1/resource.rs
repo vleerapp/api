@@ -59,7 +59,7 @@ pub fn render_album(a: &Album, include: &HashSet<String>) -> Value {
     attrs.insert("trackCount".to_string(), json!(a.track_count as i64));
     put_str(&mut attrs, "artistName", &artist_name);
     put_str(&mut attrs, "artworkUrl", &a.image);
-    put_str(&mut attrs, "upc", &a.upc);
+    put_str(&mut attrs, "upc", a.upc.as_deref().unwrap_or_default());
     put_genres(&mut attrs, &a.genres);
     put_str(&mut attrs, "releaseDate", &a.date);
 
@@ -85,7 +85,7 @@ pub fn render_song(s: &Song, include: &HashSet<String>) -> Value {
     attrs.insert("name".to_string(), json!(s.name));
     put_str(&mut attrs, "albumName", &album_name);
     put_str(&mut attrs, "artistName", &artist_name);
-    put_str(&mut attrs, "isrc", &s.isrc);
+    put_str(&mut attrs, "isrc", s.isrc.as_deref().unwrap_or_default());
     put_str(&mut attrs, "artworkUrl", &s.image);
     put_int(&mut attrs, "trackNumber", s.track_number as i64);
     put_int(&mut attrs, "discNumber", s.disc_number as i64);
