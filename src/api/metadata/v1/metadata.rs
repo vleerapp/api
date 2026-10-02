@@ -4,14 +4,11 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
-use futures::stream::{self, StreamExt};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sqlx::PgPool;
 
-use crate::api::metadata::v1::resource::{
-    parse_includes, render_album, render_artist, render_song,
-};
+use crate::api::metadata::v1::resource::{render_album, render_artist, render_song};
 use crate::{db, search};
 
 #[derive(Clone)]
@@ -21,19 +18,12 @@ pub struct SearchState {
 
 const MAX_LOOKUP_VALUES: usize = 100;
 const MATCH_CANDIDATES: i64 = 100;
-const CATALOG_FETCH_CONCURRENCY: usize = 4;
-
-#[derive(Debug, Deserialize)]
-pub struct IncludeQuery {
-    pub include: Option<String>,
-}
 
 #[derive(Debug, Deserialize)]
 pub struct CatalogQuery {
     pub ids: Option<String>,
     pub isrc: Option<String>,
     pub upc: Option<String>,
-    pub include: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -42,7 +32,6 @@ pub struct IdentifyQuery {
     pub album: Option<String>,
     pub artist: Option<String>,
     pub duration: Option<i32>,
-    pub include: Option<String>,
 }
 
 pub fn router() -> Router<SearchState> {
@@ -121,15 +110,14 @@ async fn fetch_resource(
     state: &SearchState,
     item_type: &str,
     id: &str,
-    include: &std::collections::HashSet<String>,
 ) -> Result<Option<Value>, sqlx::Error> {
     Ok(match item_type {
         "song" => db::metadata::get_song_by_id(&state.scrape_pool, id)
             .await?
-            .map(|s| render_song(&s, include)),
+            .map(|s| render_song(&s)),
         "album" => db::metadata::get_album_by_id(&state.scrape_pool, id)
             .await?
-            .map(|a| render_album(&a, include)),
+            .map(|a| render_album(&a)),
         "artist" => db::metadata::get_artist_by_id(&state.scrape_pool, id)
             .await?
             .map(|a| render_artist(&a)),
@@ -164,8 +152,6 @@ async fn catalog_collection_handler(
         )
         .into_response();
     }
-
-    let include = parse_includes(&params.include);
 
     let resolved: Vec<(String, String)> = if let Some(ids) = ids {
         let raw_ids = split_values(ids);
@@ -203,26 +189,47 @@ async fn catalog_collection_handler(
         }
     };
 
-    let results: Vec<_> = stream::iter(resolved)
-        .map(|(item_type, id)| {
-            let state = &state;
-            let include = &include;
-            async move { fetch_resource(state, &item_type, &id, include).await }
-        })
-        .buffered(CATALOG_FETCH_CONCURRENCY)
-        .collect()
-        .await;
+    let ids_of = |kind: &str| -> Vec<String> {
+        let mut seen = std::collections::HashSet::new();
+        resolved
+            .iter()
+            .filter(|(t, id)| t == kind && seen.insert(id.clone()))
+            .map(|(_, id)| id.clone())
+            .collect()
+    };
+    let song_ids = ids_of("song");
+    let album_ids = ids_of("album");
+    let artist_ids = ids_of("artist");
 
-    let mut data: Vec<Value> = Vec::with_capacity(results.len());
-    for result in results {
-        match result {
-            Ok(Some(resource)) => data.push(resource),
-            Ok(None) => {}
-            Err(e) => {
-                return db_error_response(&e, "lookup error", "Lookup failed").into_response();
-            }
+    let fetched = tokio::try_join!(
+        db::metadata::get_songs_by_ids(&state.scrape_pool, &song_ids),
+        db::metadata::get_albums_by_ids(&state.scrape_pool, &album_ids),
+        db::metadata::get_artists_by_ids(&state.scrape_pool, &artist_ids),
+    );
+    let (songs, albums, artists) = match fetched {
+        Ok(v) => v,
+        Err(e) => {
+            return db_error_response(&e, "lookup error", "Lookup failed").into_response();
         }
-    }
+    };
+
+    let songs: std::collections::HashMap<_, _> =
+        songs.iter().map(|x| (x.id.as_str(), render_song(x))).collect();
+    let albums: std::collections::HashMap<_, _> =
+        albums.iter().map(|x| (x.id.as_str(), render_album(x))).collect();
+    let artists: std::collections::HashMap<_, _> =
+        artists.iter().map(|x| (x.id.as_str(), render_artist(x))).collect();
+
+    let data: Vec<Value> = resolved
+        .iter()
+        .filter_map(|(t, id)| match t.as_str() {
+            "song" => songs.get(id.as_str()),
+            "album" => albums.get(id.as_str()),
+            "artist" => artists.get(id.as_str()),
+            _ => None,
+        })
+        .cloned()
+        .collect();
 
     (StatusCode::OK, Json(json!({ "data": data }))).into_response()
 }
@@ -230,16 +237,13 @@ async fn catalog_collection_handler(
 async fn catalog_single_handler(
     State(state): State<SearchState>,
     Path(raw_id): Path<String>,
-    Query(params): Query<IncludeQuery>,
 ) -> impl IntoResponse {
     let Some((item_type, id)) = parse_id(&raw_id) else {
         return error_response(StatusCode::BAD_REQUEST, "Invalid id. Expected omm:TYPE:ID")
             .into_response();
     };
 
-    let include = parse_includes(&params.include);
-
-    match fetch_resource(&state, &item_type, &id, &include).await {
+    match fetch_resource(&state, &item_type, &id).await {
         Ok(Some(resource)) => (StatusCode::OK, Json(json!({ "data": resource }))).into_response(),
         Ok(None) => error_response(StatusCode::NOT_FOUND, "Resource not found").into_response(),
         Err(e) => db_error_response(&e, "lookup error", "Lookup failed").into_response(),
@@ -308,9 +312,7 @@ async fn identify_handler(
     };
     let matched_id = matched.id.clone();
 
-    let include = parse_includes(&params.include);
-
-    let result = fetch_resource(&state, &item_type, &matched_id, &include).await;
+    let result = fetch_resource(&state, &item_type, &matched_id).await;
 
     match result {
         Ok(Some(resource)) => (StatusCode::OK, Json(json!({ "data": resource }))).into_response(),

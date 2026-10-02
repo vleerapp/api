@@ -27,7 +27,6 @@ tower = "0.5.3"
 tower-http = { version = "0.7.1", features = ["cors"] }
 tower_governor = "0.8.0"
 governor = "0.10.4"
-futures = "0.3.34"
 reqwest = { version = "0.13.5", features = ["json", "form"] }
 strsim = "0.11.1"
 nucleo-matcher = "0.3.1"
