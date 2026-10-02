@@ -300,7 +300,9 @@ async fn identify_handler(
         name,
         artist,
         album,
-        params.duration.filter(|_| item_type == "song" && params.duration > Some(0)),
+        params
+            .duration
+            .filter(|_| item_type == "song" && params.duration > Some(0)),
     ) else {
         return error_response(StatusCode::NOT_FOUND, "No match found").into_response();
     };

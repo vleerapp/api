@@ -67,8 +67,8 @@ pub fn router() -> Router {
         cache: Arc::new(RwLock::new(Cache::default())),
     };
     Router::new()
-        .route("/v1", get(downloads_handler))
-        .route("/v1/", get(downloads_handler))
+        .route("/v1", get(download_handler))
+        .route("/v1/", get(download_handler))
         .with_state(state)
 }
 
@@ -127,7 +127,7 @@ fn normalize_arch(arch: &str) -> Option<&'static str> {
     ARCHES.into_iter().find(|a| *a == arch)
 }
 
-async fn downloads_handler(
+async fn download_handler(
     State(state): State<DownloadsState>,
     Query(query): Query<ReleaseQuery>,
 ) -> Response {

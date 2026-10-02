@@ -57,14 +57,14 @@ pub async fn candidates(
     }
 
     let artist_exists = match artist {
-        Some(a) if item_type != "artist" => sqlx::query_scalar::<_, i32>(
-            "SELECT 1 FROM artists WHERE name &&& $1::text LIMIT 1",
-        )
-        .persistent(false)
-        .bind(a)
-        .fetch_optional(pool)
-        .await?
-        .is_some(),
+        Some(a) if item_type != "artist" => {
+            sqlx::query_scalar::<_, i32>("SELECT 1 FROM artists WHERE name &&& $1::text LIMIT 1")
+                .persistent(false)
+                .bind(a)
+                .fetch_optional(pool)
+                .await?
+                .is_some()
+        }
         _ => false,
     };
     let fuzzy_modes: &[Mode] = if artist_exists {

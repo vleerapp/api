@@ -8,7 +8,8 @@ use validator::{Validate, ValidationError};
 static SEMVER_REGEX: OnceLock<Regex> = OnceLock::new();
 
 fn validate_semver(version: &str) -> Result<(), ValidationError> {
-    let regex = SEMVER_REGEX.get_or_init(|| Regex::new(r"^\d+\.\d+\.\d+(-nightly\.\d{8}\.\d+)?$").unwrap());
+    let regex =
+        SEMVER_REGEX.get_or_init(|| Regex::new(r"^\d+\.\d+\.\d+(-nightly\.\d{8}\.\d+)?$").unwrap());
 
     if regex.is_match(version) {
         Ok(())
