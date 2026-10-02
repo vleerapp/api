@@ -49,15 +49,18 @@ pub async fn album_ids_by_upc(pool: &PgPool, upcs: &[String]) -> Result<Vec<Stri
     Ok(rows.into_iter().map(|r| r.get::<String, _>("id")).collect())
 }
 
-pub async fn get_song_by_id(pool: &PgPool, id: &str) -> Result<Option<Song>, sqlx::Error> {
-    let row = sqlx::query(
+pub async fn get_songs_by_ids(pool: &PgPool, ids: &[String]) -> Result<Vec<Song>, sqlx::Error> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let rows = sqlx::query(
         r#"WITH song_genres_agg AS (
                 SELECT
                     sg.song_id,
                     array_agg(g.name ORDER BY g.name) AS genres
                 FROM song_genres sg
                 JOIN genres g ON sg.genre_id = g.id
-                WHERE sg.song_id = $1
+                WHERE sg.song_id = ANY($1)
                 GROUP BY sg.song_id
             ),
             artist_genres_agg AS (
@@ -67,7 +70,7 @@ pub async fn get_song_by_id(pool: &PgPool, id: &str) -> Result<Option<Song>, sql
                 FROM artist_genres ag
                 JOIN genres g ON ag.genre_id = g.id
                 WHERE ag.artist_id IN (
-                    SELECT sa.artist_id FROM song_artists sa WHERE sa.song_id = $1
+                    SELECT sa.artist_id FROM song_artists sa WHERE sa.song_id = ANY($1)
                 )
                 GROUP BY ag.artist_id
             ),
@@ -83,7 +86,7 @@ pub async fn get_song_by_id(pool: &PgPool, id: &str) -> Result<Option<Song>, sql
                 FROM song_artists sa
                 JOIN artists a ON sa.artist_id = a.id
                 LEFT JOIN artist_genres_agg aga ON aga.artist_id = a.id
-                WHERE sa.song_id = $1
+                WHERE sa.song_id = ANY($1)
                 GROUP BY sa.song_id
             ),
             album_artist_genres_agg AS (
@@ -95,7 +98,7 @@ pub async fn get_song_by_id(pool: &PgPool, id: &str) -> Result<Option<Song>, sql
                 WHERE ag.artist_id IN (
                     SELECT aa.artist_id FROM artist_albums aa
                     WHERE aa.album_id IN (
-                        SELECT sal.album_id FROM song_albums sal WHERE sal.song_id = $1
+                        SELECT sal.album_id FROM song_albums sal WHERE sal.song_id = ANY($1)
                     )
                 )
                 GROUP BY ag.artist_id
@@ -113,7 +116,7 @@ pub async fn get_song_by_id(pool: &PgPool, id: &str) -> Result<Option<Song>, sql
                 JOIN artists a ON aa.artist_id = a.id
                 LEFT JOIN album_artist_genres_agg aaga ON aaga.artist_id = a.id
                 WHERE aa.album_id IN (
-                    SELECT sal.album_id FROM song_albums sal WHERE sal.song_id = $1
+                    SELECT sal.album_id FROM song_albums sal WHERE sal.song_id = ANY($1)
                 )
                 GROUP BY aa.album_id
             ),
@@ -124,7 +127,7 @@ pub async fn get_song_by_id(pool: &PgPool, id: &str) -> Result<Option<Song>, sql
                 FROM album_genres ag
                 JOIN genres g ON ag.genre_id = g.id
                 WHERE ag.album_id IN (
-                    SELECT sal.album_id FROM song_albums sal WHERE sal.song_id = $1
+                    SELECT sal.album_id FROM song_albums sal WHERE sal.song_id = ANY($1)
                 )
                 GROUP BY ag.album_id
             ),
@@ -146,7 +149,7 @@ pub async fn get_song_by_id(pool: &PgPool, id: &str) -> Result<Option<Song>, sql
                 JOIN albums al ON sal.album_id = al.id
                 LEFT JOIN album_artists_agg ala ON ala.album_id = al.id
                 LEFT JOIN album_genres_agg alga ON alga.album_id = al.id
-                WHERE sal.song_id = $1
+                WHERE sal.song_id = ANY($1)
                 GROUP BY sal.song_id
             )
            SELECT s.id, s.name,
@@ -164,14 +167,17 @@ pub async fn get_song_by_id(pool: &PgPool, id: &str) -> Result<Option<Song>, sql
            LEFT JOIN artist_agg ON artist_agg.song_id = s.id
            LEFT JOIN album_agg ON album_agg.song_id = s.id
            LEFT JOIN song_genres_agg ON song_genres_agg.song_id = s.id
-           WHERE s.id = $1
+           WHERE s.id = ANY($1)
         "#,
     )
-    .bind(id)
-    .fetch_optional(pool)
+    .bind(ids)
+    .fetch_all(pool)
     .await?;
 
-    let Some(r) = row else { return Ok(None) };
+    Ok(rows.into_iter().filter_map(song_from_row).collect())
+}
+
+fn song_from_row(r: sqlx::postgres::PgRow) -> Option<Song> {
 
     let artists_json: Option<serde_json::Value> = r.get("artists_json");
     let albums_json: Option<serde_json::Value> = r.get("albums_json");
@@ -185,10 +191,10 @@ pub async fn get_song_by_id(pool: &PgPool, id: &str) -> Result<Option<Song>, sql
     };
 
     if artists.is_empty() || albums.is_empty() {
-        return Ok(None);
+        return None;
     }
 
-    Ok(Some(Song {
+    Some(Song {
         id: r.get("id"),
         name: r.get("name"),
         artist: artists,
@@ -200,33 +206,52 @@ pub async fn get_song_by_id(pool: &PgPool, id: &str) -> Result<Option<Song>, sql
         duration: r.get::<i32, _>("duration"),
         isrc: r.get("isrc"),
         date: r.get("date"),
-    }))
+    })
 }
 
-pub async fn get_artist_by_id(pool: &PgPool, id: &str) -> Result<Option<Artist>, sqlx::Error> {
-    let row = sqlx::query(
+pub async fn get_song_by_id(pool: &PgPool, id: &str) -> Result<Option<Song>, sqlx::Error> {
+    Ok(get_songs_by_ids(pool, &[id.to_string()]).await?.into_iter().next())
+}
+
+pub async fn get_artists_by_ids(pool: &PgPool, ids: &[String]) -> Result<Vec<Artist>, sqlx::Error> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let rows = sqlx::query(
         r#"SELECT a.id, a.name, COALESCE(artwork_url(a.image), '') AS image,
                   COALESCE(array_agg(DISTINCT g.name) FILTER (WHERE g.name IS NOT NULL), '{}') AS genres
            FROM artists a
            LEFT JOIN artist_genres ag ON ag.artist_id = a.id
            LEFT JOIN genres g ON g.id = ag.genre_id
-           WHERE a.id = $1
+           WHERE a.id = ANY($1)
            GROUP BY a.id, a.name, a.image"#,
     )
-    .bind(id)
-    .fetch_optional(pool)
+    .bind(ids)
+    .fetch_all(pool)
     .await?;
 
-    Ok(row.map(|r| Artist {
+    Ok(rows
+        .into_iter()
+        .map(|r| Artist {
         id: r.get("id"),
         name: r.get("name"),
         image: r.get("image"),
         genres: r.get::<Vec<String>, _>("genres"),
-    }))
+        })
+        .collect())
 }
 
-pub async fn get_album_by_id(pool: &PgPool, id: &str) -> Result<Option<Album>, sqlx::Error> {
-    let row = sqlx::query(
+pub async fn get_artist_by_id(pool: &PgPool, id: &str) -> Result<Option<Artist>, sqlx::Error> {
+    Ok(get_artists_by_ids(pool, &[id.to_string()]).await?.into_iter().next())
+}
+
+
+
+pub async fn get_albums_by_ids(pool: &PgPool, ids: &[String]) -> Result<Vec<Album>, sqlx::Error> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let rows = sqlx::query(
         r#"WITH artist_genres_agg AS (
                 SELECT
                     ag.artist_id,
@@ -234,7 +259,7 @@ pub async fn get_album_by_id(pool: &PgPool, id: &str) -> Result<Option<Album>, s
                 FROM artist_genres ag
                 JOIN genres g ON ag.genre_id = g.id
                 WHERE ag.artist_id IN (
-                    SELECT aa.artist_id FROM artist_albums aa WHERE aa.album_id = $1
+                    SELECT aa.artist_id FROM artist_albums aa WHERE aa.album_id = ANY($1)
                 )
                 GROUP BY ag.artist_id
             )
@@ -254,15 +279,18 @@ pub async fn get_album_by_id(pool: &PgPool, id: &str) -> Result<Option<Album>, s
            LEFT JOIN artist_genres_agg aga ON aga.artist_id = a.id
            LEFT JOIN album_genres alg ON alg.album_id = al.id
            LEFT JOIN genres g2 ON g2.id = alg.genre_id
-           WHERE al.id = $1
+           WHERE al.id = ANY($1)
            GROUP BY al.id, al.name, al.image, al.date,
                     al.track_count, al.upc, al.label"#,
     )
-    .bind(id)
-    .fetch_optional(pool)
+    .bind(ids)
+    .fetch_all(pool)
     .await?;
 
-    let Some(r) = row else { return Ok(None) };
+    Ok(rows.into_iter().filter_map(album_from_row).collect())
+}
+
+fn album_from_row(r: sqlx::postgres::PgRow) -> Option<Album> {
 
     let artists_json: Option<serde_json::Value> = r.get("artists_json");
     let artists: Vec<Artist> = match artists_json {
@@ -271,10 +299,10 @@ pub async fn get_album_by_id(pool: &PgPool, id: &str) -> Result<Option<Album>, s
     };
 
     if artists.is_empty() {
-        return Ok(None);
+        return None;
     }
 
-    Ok(Some(Album {
+    Some(Album {
         id: r.get("id"),
         name: r.get("name"),
         artist: artists,
@@ -284,5 +312,9 @@ pub async fn get_album_by_id(pool: &PgPool, id: &str) -> Result<Option<Album>, s
         track_count: r.get::<i16, _>("track_count") as i32,
         upc: r.get("upc"),
         label: r.get::<Option<String>, _>("label"),
-    }))
+    })
+}
+
+pub async fn get_album_by_id(pool: &PgPool, id: &str) -> Result<Option<Album>, sqlx::Error> {
+    Ok(get_albums_by_ids(pool, &[id.to_string()]).await?.into_iter().next())
 }
