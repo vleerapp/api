@@ -9,6 +9,8 @@ const NAME_WEIGHT: f64 = 0.6;
 const ARTIST_WEIGHT: f64 = 0.3;
 const ALBUM_WEIGHT: f64 = 0.1;
 const POPULARITY_WEIGHT: f64 = 0.15;
+const DURATION_WEIGHT: f64 = 0.3;
+pub const DURATION_TOLERANCE_MS: i32 = 50;
 
 struct Field {
     query: String,
@@ -79,6 +81,7 @@ pub fn best_match<'a>(
     name: &str,
     artist: Option<&str>,
     album: Option<&str>,
+    duration: Option<i32>,
 ) -> Option<&'a Candidate> {
     let mut matcher = Matcher::new(Config::DEFAULT);
     let mut buf = Vec::new();
@@ -106,6 +109,13 @@ pub fn best_match<'a>(
             }
             let pop = ((c.popularity_score as f64 + 1.0).ln() / (max_pop + 1.0).ln()).min(1.0);
             score += pop * POPULARITY_WEIGHT;
+            if let (Some(want), Some(have)) = (duration, c.duration) {
+                let diff = (want - have).abs();
+                if diff <= DURATION_TOLERANCE_MS {
+                    score += (1.0 - diff as f64 / (DURATION_TOLERANCE_MS as f64 + 1.0))
+                        * DURATION_WEIGHT;
+                }
+            }
             (c, score)
         })
         .max_by(|(_, a), (_, b)| a.total_cmp(b))

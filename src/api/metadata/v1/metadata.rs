@@ -41,6 +41,7 @@ pub struct IdentifyQuery {
     pub name: Option<String>,
     pub album: Option<String>,
     pub artist: Option<String>,
+    pub duration: Option<i32>,
     pub include: Option<String>,
 }
 
@@ -294,7 +295,13 @@ async fn identify_handler(
         }
     };
 
-    let Some(matched) = search::best_match(&candidates, name, artist, album) else {
+    let Some(matched) = search::best_match(
+        &candidates,
+        name,
+        artist,
+        album,
+        params.duration.filter(|_| item_type == "song" && params.duration > Some(0)),
+    ) else {
         return error_response(StatusCode::NOT_FOUND, "No match found").into_response();
     };
     let matched_id = matched.id.clone();

@@ -6,6 +6,7 @@ pub struct Candidate {
     pub artist: String,
     pub album: String,
     pub popularity_score: i64,
+    pub duration: Option<i32>,
 }
 
 #[derive(Clone, Copy)]
@@ -160,7 +161,7 @@ async fn run(
         query = query.bind(a);
     }
 
-    Ok(query
+    let mut found: Vec<Candidate> = query
         .fetch_all(pool)
         .await?
         .into_iter()
@@ -170,6 +171,25 @@ async fn run(
             artist: r.get(2),
             album: r.get(3),
             popularity_score: r.get(4),
+            duration: None,
         })
-        .collect())
+        .collect();
+
+    if item_type == "song" && !found.is_empty() {
+        let ids: Vec<String> = found.iter().map(|c| c.id.clone()).collect();
+        let rows = sqlx::query("SELECT id, duration FROM songs WHERE id = ANY($1)")
+            .persistent(false)
+            .bind(&ids)
+            .fetch_all(pool)
+            .await?;
+        let durations: std::collections::HashMap<String, i32> = rows
+            .into_iter()
+            .map(|r| (r.get::<String, _>(0), r.get::<i32, _>(1)))
+            .collect();
+        for c in &mut found {
+            c.duration = durations.get(&c.id).copied();
+        }
+    }
+
+    Ok(found)
 }
