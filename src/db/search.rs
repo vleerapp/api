@@ -11,6 +11,7 @@ pub struct Candidate {
 
 #[derive(Clone, Copy)]
 enum Mode {
+    Fast,
     ExactAll,
     ExactAny,
     FuzzyName,
@@ -35,6 +36,17 @@ pub async fn candidates(
 ) -> Result<Vec<Candidate>, sqlx::Error> {
     let wanted_artist = artist.map(str::to_lowercase);
     let mut fallback = Vec::new();
+
+    if wanted_artist.is_some() && item_type != "artist" {
+        let found = run(pool, item_type, name, artist, limit, Mode::Fast).await?;
+        let wanted = wanted_artist.as_deref().unwrap_or_default();
+        if found
+            .iter()
+            .any(|c| c.artist.to_lowercase().contains(wanted))
+        {
+            return Ok(found);
+        }
+    }
 
     let single_word = name.split_whitespace().nth(1).is_none();
     for mode in [Mode::ExactAll, Mode::ExactAny] {
@@ -100,7 +112,7 @@ async fn run(
     let artist = artist.filter(|_| artist_col == "artist_names");
 
     let (name_clause, artist_clause) = match mode {
-        Mode::ExactAll => (
+        Mode::Fast | Mode::ExactAll => (
             clause("name", 1, "&&&", false),
             clause("artist_names", 3, "&&&", false),
         ),
@@ -128,9 +140,13 @@ async fn run(
     );
     let order = format!("ORDER BY pdb.score(id) DESC, {pop_col} DESC LIMIT $2");
     let order_pop = format!("ORDER BY {pop_col} DESC, pdb.score(id) DESC LIMIT $2");
-    let exact = matches!(mode, Mode::ExactAll | Mode::ExactAny);
+    let exact = matches!(mode, Mode::Fast | Mode::ExactAll | Mode::ExactAny);
 
     let sql = match (artist, mode) {
+        (Some(_), Mode::Fast | Mode::ExactAny) => format!(
+            "({select} WHERE {name_clause} AND {artist_clause} {order}) UNION \
+             ({select} WHERE {name_clause} AND {artist_clause} {order_pop})"
+        ),
         (Some(_), Mode::FuzzyName | Mode::FuzzyArtist | Mode::FuzzyBoth) => {
             format!("{select} WHERE {name_clause} AND {artist_clause} {order}")
         }
