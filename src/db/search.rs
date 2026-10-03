@@ -5,8 +5,14 @@ pub struct Candidate {
     pub name: String,
     pub artist: String,
     pub album: String,
-    pub popularity_score: i64,
+    pub popularity_score: f64,
     pub duration: Option<i32>,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Scope {
+    Hot,
+    Full,
 }
 
 #[derive(Clone, Copy)]
@@ -27,8 +33,35 @@ fn clause(column: &str, param: usize, op: &str, fuzzy: bool) -> String {
     }
 }
 
+fn artist_matches(found: &[Candidate], wanted: Option<&str>) -> bool {
+    wanted.is_none_or(|w| found.iter().any(|c| c.artist.to_lowercase().contains(w)))
+}
+
 pub async fn candidates(
     pool: &PgPool,
+    item_type: &str,
+    name: &str,
+    artist: Option<&str>,
+    limit: i64,
+) -> Result<Vec<Candidate>, sqlx::Error> {
+    if item_type == "artist" {
+        return candidates_in(pool, Scope::Full, item_type, name, artist, limit).await;
+    }
+    let wanted = artist.map(str::to_lowercase);
+    let hot = candidates_in(pool, Scope::Hot, item_type, name, artist, limit).await?;
+    if !hot.is_empty() && artist_matches(&hot, wanted.as_deref()) {
+        return Ok(hot);
+    }
+    let full = candidates_in(pool, Scope::Full, item_type, name, artist, limit).await?;
+    if full.is_empty() || (!hot.is_empty() && !artist_matches(&full, wanted.as_deref())) {
+        return Ok(hot);
+    }
+    Ok(full)
+}
+
+async fn candidates_in(
+    pool: &PgPool,
+    scope: Scope,
     item_type: &str,
     name: &str,
     artist: Option<&str>,
@@ -38,7 +71,7 @@ pub async fn candidates(
     let mut fallback = Vec::new();
 
     if wanted_artist.is_some() && item_type != "artist" {
-        let found = run(pool, item_type, name, artist, limit, Mode::Fast).await?;
+        let found = run(pool, scope, item_type, name, artist, limit, Mode::Fast).await?;
         let wanted = wanted_artist.as_deref().unwrap_or_default();
         if found
             .iter()
@@ -53,7 +86,7 @@ pub async fn candidates(
         if single_word && matches!(mode, Mode::ExactAny) {
             continue;
         }
-        let found = run(pool, item_type, name, artist, limit, mode).await?;
+        let found = run(pool, scope, item_type, name, artist, limit, mode).await?;
         if found.is_empty() {
             continue;
         }
@@ -87,7 +120,7 @@ pub async fn candidates(
         &[Mode::FuzzyBoth]
     };
     for &mode in fuzzy_modes {
-        let found = run(pool, item_type, name, artist, limit, mode).await?;
+        let found = run(pool, scope, item_type, name, artist, limit, mode).await?;
         if !found.is_empty() {
             return Ok(found);
         }
@@ -98,6 +131,7 @@ pub async fn candidates(
 
 async fn run(
     pool: &PgPool,
+    scope: Scope,
     item_type: &str,
     name: &str,
     artist: Option<&str>,
@@ -105,7 +139,13 @@ async fn run(
     mode: Mode,
 ) -> Result<Vec<Candidate>, sqlx::Error> {
     let (table, artist_col, album_col, pop_col) = match item_type {
+        "song" if scope == Scope::Hot => {
+            ("search_songs_hot", "artist_names", "album_name", "popularity")
+        }
         "song" => ("search_songs", "artist_names", "album_name", "popularity"),
+        "album" if scope == Scope::Hot => {
+            ("search_albums_hot", "artist_names", "''::text", "popularity")
+        }
         "album" => ("search_albums", "artist_names", "''::text", "popularity"),
         _ => ("artists", "''::text", "''::text", "popularity_score"),
     };
@@ -136,36 +176,16 @@ async fn run(
 
     let select = format!(
         "SELECT id, name, {artist_col} AS artist_name, {album_col} AS album_name, \
-         COALESCE({pop_col}, 0)::bigint AS pop FROM {table}"
+         COALESCE({pop_col}, 0)::float8 AS pop FROM {table}"
     );
     let order = format!("ORDER BY pdb.score(id) DESC, {pop_col} DESC LIMIT $2");
-    let order_pop = format!("ORDER BY {pop_col} DESC, pdb.score(id) DESC LIMIT $2");
-    let exact = matches!(mode, Mode::Fast | Mode::ExactAll | Mode::ExactAny);
 
     let sql = match (artist, mode) {
-        (Some(_), Mode::Fast | Mode::ExactAny) => format!(
-            "({select} WHERE {name_clause} AND {artist_clause} {order}) UNION \
-             ({select} WHERE {name_clause} AND {artist_clause} {order_pop})"
+        (Some(_), Mode::ExactAll) => format!(
+            "({select} WHERE {name_clause} {order}) UNION \
+             ({select} WHERE {name_clause} AND {artist_clause} {order})"
         ),
-        (Some(_), Mode::FuzzyName | Mode::FuzzyArtist | Mode::FuzzyBoth) => {
-            format!("{select} WHERE {name_clause} AND {artist_clause} {order}")
-        }
-        (Some(_), _) => {
-            let mut arms = vec![
-                format!("({select} WHERE {name_clause} {order})"),
-                format!("({select} WHERE {name_clause} AND {artist_clause} {order})"),
-            ];
-            if exact {
-                arms.push(format!("({select} WHERE {name_clause} {order_pop})"));
-                arms.push(format!(
-                    "({select} WHERE {name_clause} AND {artist_clause} {order_pop})"
-                ));
-            }
-            arms.join(" UNION ")
-        }
-        (None, _) if exact => format!(
-            "({select} WHERE {name_clause} {order}) UNION ({select} WHERE {name_clause} {order_pop})"
-        ),
+        (Some(_), _) => format!("{select} WHERE {name_clause} AND {artist_clause} {order}"),
         (None, _) => format!("{select} WHERE {name_clause} {order}"),
     };
 

@@ -92,10 +92,8 @@ pub fn best_match<'a>(
 
     let max_pop = candidates
         .iter()
-        .map(|c| c.popularity_score)
-        .max()
-        .unwrap_or(1)
-        .max(1) as f64;
+        .map(|c| c.popularity_score * 100.0)
+        .fold(1.0, f64::max);
 
     candidates
         .iter()
@@ -107,7 +105,7 @@ pub fn best_match<'a>(
             if let Some(f) = &album {
                 score += f.score(&c.album, false, &mut matcher, &mut buf) * ALBUM_WEIGHT;
             }
-            let pop = ((c.popularity_score as f64 + 1.0).ln() / (max_pop + 1.0).ln()).min(1.0);
+            let pop = ((c.popularity_score * 100.0 + 1.0).ln() / (max_pop + 1.0).ln()).min(1.0);
             score += pop * POPULARITY_WEIGHT;
             if let (Some(want), Some(have)) = (duration, c.duration) {
                 let diff = (want - have).abs();
