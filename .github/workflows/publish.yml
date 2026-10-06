@@ -73,9 +73,9 @@ jobs:
 
       - name: Create Runtime Dockerfile
         run: |
-          echo 'FROM debian:bookworm-slim' > Dockerfile.final
+          echo 'FROM debian:trixie-slim' > Dockerfile.final
           echo 'WORKDIR /app' >> Dockerfile.final
-          echo 'RUN apt-get update && apt-get install -y libssl3 ca-certificates && rm -rf /var/lib/apt/lists/*' >> Dockerfile.final
+          echo 'RUN apt-get update && apt-get install -y libssl3t64 ca-certificates && rm -rf /var/lib/apt/lists/*' >> Dockerfile.final
           echo 'ARG TARGETARCH' >> Dockerfile.final
           echo 'COPY binaries/binary-x86_64-unknown-linux-gnu/vleer_api /app/vleer_api_amd64' >> Dockerfile.final
           echo 'COPY binaries/binary-aarch64-unknown-linux-gnu/vleer_api /app/vleer_api_arm64' >> Dockerfile.final
