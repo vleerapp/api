@@ -10,6 +10,7 @@ const ARTIST_WEIGHT: f64 = 0.3;
 const ALBUM_WEIGHT: f64 = 0.1;
 const POPULARITY_WEIGHT: f64 = 0.15;
 const DURATION_WEIGHT: f64 = 0.3;
+const ALBUM_TIER_PENALTY: f64 = 0.05;
 pub const DURATION_TOLERANCE_MS: i32 = 50;
 
 struct Field {
@@ -107,6 +108,7 @@ pub fn best_match<'a>(
             }
             let pop = ((c.popularity_score * 100.0 + 1.0).ln() / (max_pop + 1.0).ln()).min(1.0);
             score += pop * POPULARITY_WEIGHT;
+            score -= c.album_tier.clamp(0, 8) as f64 * ALBUM_TIER_PENALTY;
             if let (Some(want), Some(have)) = (duration, c.duration) {
                 let diff = (want - have).abs();
                 if diff <= DURATION_TOLERANCE_MS {

@@ -7,6 +7,7 @@ pub struct Candidate {
     pub album: String,
     pub popularity_score: f64,
     pub duration: Option<i32>,
+    pub album_tier: i32,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -208,22 +209,35 @@ async fn run(
             album: r.get(3),
             popularity_score: r.get(4),
             duration: None,
+            album_tier: 0,
         })
         .collect();
 
     if item_type == "song" && !found.is_empty() {
         let ids: Vec<String> = found.iter().map(|c| c.id.clone()).collect();
-        let rows = sqlx::query("SELECT id, duration FROM songs WHERE id = ANY($1)")
-            .persistent(false)
-            .bind(&ids)
-            .fetch_all(pool)
-            .await?;
-        let durations: std::collections::HashMap<String, i32> = rows
+        let rows = sqlx::query(
+            "SELECT s.id, s.duration, COALESCE((
+                 SELECT min(song_album_tier(al.name, al.track_count, EXISTS (
+                     SELECT 1 FROM artist_albums aa
+                     JOIN song_artists sar ON sar.artist_id = aa.artist_id AND sar.song_id = s.id
+                     WHERE aa.album_id = al.id)))
+                 FROM song_albums sal JOIN albums al ON al.id = sal.album_id
+                 WHERE sal.song_id = s.id), 0) AS tier
+             FROM songs s WHERE s.id = ANY($1)",
+        )
+        .persistent(false)
+        .bind(&ids)
+        .fetch_all(pool)
+        .await?;
+        let details: std::collections::HashMap<String, (i32, i32)> = rows
             .into_iter()
-            .map(|r| (r.get::<String, _>(0), r.get::<i32, _>(1)))
+            .map(|r| (r.get::<String, _>(0), (r.get::<i32, _>(1), r.get::<i32, _>(2))))
             .collect();
         for c in &mut found {
-            c.duration = durations.get(&c.id).copied();
+            if let Some(&(duration, tier)) = details.get(&c.id) {
+                c.duration = Some(duration);
+                c.album_tier = tier;
+            }
         }
     }
 
