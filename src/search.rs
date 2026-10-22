@@ -77,6 +77,77 @@ impl Field {
     }
 }
 
+struct Scorer {
+    matcher: Matcher,
+    buf: Vec<char>,
+    name: Field,
+    artist: Option<Field>,
+    album: Option<Field>,
+    max_pop: f64,
+}
+
+impl Scorer {
+    fn new(
+        candidates: &[Candidate],
+        name: &str,
+        artist: Option<&str>,
+        album: Option<&str>,
+    ) -> Self {
+        let mut matcher = Matcher::new(Config::DEFAULT);
+        let mut buf = Vec::new();
+        let name = Field::new(name, &mut matcher, &mut buf);
+        let artist = artist.map(|a| Field::new(a, &mut matcher, &mut buf));
+        let album = album.map(|a| Field::new(a, &mut matcher, &mut buf));
+        let max_pop = candidates
+            .iter()
+            .map(|c| c.popularity_score * 100.0)
+            .fold(1.0, f64::max);
+        Self {
+            matcher,
+            buf,
+            name,
+            artist,
+            album,
+            max_pop,
+        }
+    }
+
+    fn base(&mut self, c: &Candidate) -> f64 {
+        let mut score = self
+            .name
+            .score(&c.name, true, &mut self.matcher, &mut self.buf)
+            * NAME_WEIGHT;
+        if let Some(f) = &self.artist {
+            score += f.score(&c.artist, false, &mut self.matcher, &mut self.buf) * ARTIST_WEIGHT;
+        }
+        if let Some(f) = &self.album {
+            score += f.score(&c.album, false, &mut self.matcher, &mut self.buf) * ALBUM_WEIGHT;
+        }
+        let pop = ((c.popularity_score * 100.0 + 1.0).ln() / (self.max_pop + 1.0).ln()).min(1.0);
+        score + pop * POPULARITY_WEIGHT
+    }
+}
+
+pub fn shortlist(
+    candidates: Vec<Candidate>,
+    name: &str,
+    artist: Option<&str>,
+    album: Option<&str>,
+    keep: usize,
+) -> Vec<Candidate> {
+    if candidates.len() <= keep {
+        return candidates;
+    }
+    let mut scorer = Scorer::new(&candidates, name, artist, album);
+    let mut scored: Vec<(f64, Candidate)> = candidates
+        .into_iter()
+        .map(|c| (scorer.base(&c), c))
+        .collect();
+    scored.sort_by(|a, b| b.0.total_cmp(&a.0));
+    scored.truncate(keep);
+    scored.into_iter().map(|(_, c)| c).collect()
+}
+
 pub fn best_match<'a>(
     candidates: &'a [Candidate],
     name: &str,
@@ -84,30 +155,12 @@ pub fn best_match<'a>(
     album: Option<&str>,
     duration: Option<i32>,
 ) -> Option<&'a Candidate> {
-    let mut matcher = Matcher::new(Config::DEFAULT);
-    let mut buf = Vec::new();
-
-    let name = Field::new(name, &mut matcher, &mut buf);
-    let artist = artist.map(|a| Field::new(a, &mut matcher, &mut buf));
-    let album = album.map(|a| Field::new(a, &mut matcher, &mut buf));
-
-    let max_pop = candidates
-        .iter()
-        .map(|c| c.popularity_score * 100.0)
-        .fold(1.0, f64::max);
+    let mut scorer = Scorer::new(candidates, name, artist, album);
 
     candidates
         .iter()
         .map(|c| {
-            let mut score = name.score(&c.name, true, &mut matcher, &mut buf) * NAME_WEIGHT;
-            if let Some(f) = &artist {
-                score += f.score(&c.artist, false, &mut matcher, &mut buf) * ARTIST_WEIGHT;
-            }
-            if let Some(f) = &album {
-                score += f.score(&c.album, false, &mut matcher, &mut buf) * ALBUM_WEIGHT;
-            }
-            let pop = ((c.popularity_score * 100.0 + 1.0).ln() / (max_pop + 1.0).ln()).min(1.0);
-            score += pop * POPULARITY_WEIGHT;
+            let mut score = scorer.base(c);
             score -= c.album_tier.clamp(0, 8) as f64 * ALBUM_TIER_PENALTY;
             if let (Some(want), Some(have)) = (duration, c.duration) {
                 let diff = (want - have).abs();
