@@ -1,5 +1,6 @@
 mod api;
 mod db;
+mod manticore;
 mod models;
 mod rate_limit;
 mod search;
@@ -63,6 +64,20 @@ async fn main() {
         }
     };
 
+    let manticore = std::env::var("MANTICORE_URL")
+        .ok()
+        .filter(|u| !u.trim().is_empty())
+        .and_then(|url| match manticore::Manticore::new(&url) {
+            Ok(m) => {
+                info!("search backend: manticore at {}", url);
+                Some(std::sync::Arc::new(m))
+            }
+            Err(e) => {
+                warn!("manticore unavailable, using postgres search: {}", e);
+                None
+            }
+        });
+
     let cors_origins: Vec<HeaderValue> = std::env::var("ALLOWED_ORIGINS")
         .unwrap_or_default()
         .split(',')
@@ -82,7 +97,7 @@ async fn main() {
         .allow_headers([header::CONTENT_TYPE]);
 
     let app = Router::new()
-        .merge(api::app_router(pool, scrape_pool))
+        .merge(api::app_router(pool, scrape_pool, manticore))
         .layer(cors)
         .layer(DefaultBodyLimit::max(64 * 1024))
         .layer(rate_limit(20, 1000));

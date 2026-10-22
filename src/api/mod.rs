@@ -1,5 +1,7 @@
 use axum::{Router, body::Body, extract::Request, routing::any};
+use crate::manticore::Manticore;
 use sqlx::PgPool;
+use std::sync::Arc;
 
 pub mod download;
 pub mod metadata;
@@ -7,7 +9,11 @@ pub mod telemetry;
 pub mod update;
 pub mod validation;
 
-pub fn app_router(pool: PgPool, scrape_pool: Option<PgPool>) -> Router {
+pub fn app_router(
+    pool: PgPool,
+    scrape_pool: Option<PgPool>,
+    manticore: Option<Arc<Manticore>>,
+) -> Router {
     let mut router = Router::new()
         .nest("/telemetry", telemetry::router().with_state(pool))
         .nest("/update", update::router())
@@ -15,7 +21,7 @@ pub fn app_router(pool: PgPool, scrape_pool: Option<PgPool>) -> Router {
         .route("/", any(|_: Request<Body>| async { "Healthy" }));
 
     if let Some(pool) = scrape_pool {
-        router = router.nest("/metadata", metadata::router(pool));
+        router = router.nest("/metadata", metadata::router(pool, manticore));
     }
 
     router

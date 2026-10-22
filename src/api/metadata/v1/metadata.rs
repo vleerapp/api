@@ -14,10 +14,12 @@ use crate::{db, search};
 #[derive(Clone)]
 pub struct SearchState {
     pub scrape_pool: PgPool,
+    pub manticore: Option<std::sync::Arc<crate::manticore::Manticore>>,
 }
 
 const MAX_LOOKUP_VALUES: usize = 100;
 const MATCH_CANDIDATES: i64 = 100;
+const ENRICH_CANDIDATES: usize = 20;
 
 #[derive(Debug, Deserialize)]
 pub struct CatalogQuery {
@@ -279,8 +281,12 @@ async fn identify_handler(
         _ => (None, None),
     };
 
-    let candidates = match db::search::candidates(
-        &state.scrape_pool,
+    let engine = db::search::Engine {
+        pool: &state.scrape_pool,
+        manticore: state.manticore.as_deref(),
+    };
+    let mut candidates = match db::search::candidates(
+        engine,
         &item_type,
         name,
         artist,
@@ -298,6 +304,18 @@ async fn identify_handler(
             return error_response(status, "Match failed").into_response();
         }
     };
+
+    if item_type == "song" {
+        candidates = search::shortlist(candidates, name, artist, album, ENRICH_CANDIDATES);
+        if let Err(e) = db::search::enrich(&state.scrape_pool, &mut candidates).await {
+            let Some(status) = classify_db_error(&e) else {
+                tracing::warn!("enrich error, treating as no match: {}", e);
+                return error_response(StatusCode::NOT_FOUND, "No match found").into_response();
+            };
+            tracing::error!("enrich error: {}", e);
+            return error_response(status, "Match failed").into_response();
+        }
+    }
 
     let Some(matched) = search::best_match(
         &candidates,
