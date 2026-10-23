@@ -43,6 +43,13 @@ async fn main() {
     let scrape_pool = match scrape_db_url
         .parse::<sqlx::postgres::PgConnectOptions>()
         .map(|opts| {
+            let probe = opts.clone();
+            tokio::spawn(async move {
+                use sqlx::Connection;
+                if let Err(e) = sqlx::postgres::PgConnection::connect_with(&probe).await {
+                    warn!("scrape database unreachable: {}", e);
+                }
+            });
             sqlx::postgres::PgPoolOptions::new()
                 .max_connections(8)
                 .acquire_timeout(std::time::Duration::from_secs(5))
