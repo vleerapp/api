@@ -6,8 +6,10 @@ services:
       - "3000:3000"
     environment:
       - DATABASE_URL=postgres://postgres:postgres@postgres:5432/vleer_api
-      - SCRAPE_DATABASE_URL=postgres://postgres:postgres@localhost:5432/apple_music_scrape
+      - SCRAPE_DATABASE_URL=postgres://postgres:postgres@host.docker.internal:5432/apple_music_scrape
       - RUST_LOG=info
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       postgres:
         condition: service_healthy
