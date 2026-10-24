@@ -3,6 +3,7 @@ use reqwest::Client;
 use serde_json::Value;
 use std::time::Duration;
 use tokio::sync::Semaphore;
+use tracing::warn;
 
 const MAX_CONCURRENT_SEARCHES: usize = 16;
 const QUEUE_TIMEOUT: Duration = Duration::from_secs(3);
@@ -70,18 +71,27 @@ impl Manticore {
         fuzzy: bool,
         limit: i64,
     ) -> Result<Vec<Hit>> {
-        let options = if fuzzy {
-            format!("ranker=sph04, fuzzy=1, distance=1, max_query_time={MAX_QUERY_TIME_MS}")
-        } else {
-            format!("ranker=sph04, max_query_time={MAX_QUERY_TIME_MS}")
+        let plain = format!("ranker=sph04, max_query_time={MAX_QUERY_TIME_MS}");
+        let build = |options: &str| {
+            format!(
+                "SELECT doc_id, name, artist_names, album_name, popularity FROM {table} \
+                 WHERE MATCH('{}') ORDER BY weight() DESC, popularity DESC LIMIT {} OPTION {options}",
+                escape(expression),
+                limit.clamp(1, 1000),
+            )
         };
-        let sql = format!(
-            "SELECT doc_id, name, artist_names, album_name, popularity FROM {table} \
-             WHERE MATCH('{}') ORDER BY weight() DESC, popularity DESC LIMIT {} OPTION {options}",
-            escape(expression),
-            limit.clamp(1, 1000),
-        );
-        let rows = self.rows(&sql).await?;
+        let rows = if fuzzy {
+            let fuzzy_options = format!("fuzzy=1, distance=1, {plain}");
+            match self.rows(&build(&fuzzy_options)).await {
+                Err(e) if e.to_string().contains("unknown option 'fuzzy'") => {
+                    warn!("manticore buddy unavailable, fuzzy disabled: {e}");
+                    self.rows(&build(&plain)).await?
+                }
+                other => other?,
+            }
+        } else {
+            self.rows(&build(&plain)).await?
+        };
         Ok(rows
             .iter()
             .filter_map(|r| {
