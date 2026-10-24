@@ -7,6 +7,7 @@ services:
     environment:
       - DATABASE_URL=postgres://postgres:postgres@postgres:5432/vleer_api
       - SCRAPE_DATABASE_URL=postgres://postgres:postgres@host.docker.internal:5432/apple_music_scrape
+      - MANTICORE_URL=http://manticore:9308
       - RUST_LOG=info
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -48,6 +49,9 @@ services:
     image: manticoresearch/manticore:29.9.0
     container_name: manticore
     restart: unless-stopped
+    environment:
+      - searchd_access_plain_attrs=mmap
+      - searchd_access_blob_attrs=mmap
     ports:
       - "9308:9308"
     volumes:
@@ -57,7 +61,7 @@ services:
         aliases:
           - manticore
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:9308/sql -d 'mode=raw&query=SHOW TABLES' || exit 1"]
+      test: ["CMD-SHELL", "wget -qO- --post-data 'mode=raw&query=SHOW TABLES' http://localhost:9308/sql || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 5
