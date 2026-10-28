@@ -345,7 +345,7 @@ async fn run(
         .await?
         .into_iter()
         .map(|r| Candidate {
-            id: r.get(0),
+            id: r.get::<i64, _>(0).to_string(),
             name: r.get(1),
             artist: r.get(2),
             album: r.get(3),
@@ -428,7 +428,7 @@ pub async fn enrich(pool: &PgPool, found: &mut [Candidate]) -> Result<(), sqlx::
     if found.is_empty() {
         return Ok(());
     }
-    let ids: Vec<String> = found.iter().map(|c| c.id.clone()).collect();
+    let ids: Vec<i64> = found.iter().filter_map(|c| c.id.parse().ok()).collect();
     let rows = sqlx::query(
         "SELECT s.id, s.duration, COALESCE((
              SELECT min(song_album_tier(al.name, al.track_count, EXISTS (
@@ -447,7 +447,7 @@ pub async fn enrich(pool: &PgPool, found: &mut [Candidate]) -> Result<(), sqlx::
         .into_iter()
         .map(|r| {
             (
-                r.get::<String, _>(0),
+                r.get::<i64, _>(0).to_string(),
                 (r.get::<i32, _>(1), r.get::<i32, _>(2)),
             )
         })

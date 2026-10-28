@@ -26,6 +26,10 @@ pub async fn stats(pool: &PgPool) -> Result<(i64, i64, i64), sqlx::Error> {
     Ok((songs, albums, artists))
 }
 
+fn parse_ids(ids: &[String]) -> Vec<i64> {
+    ids.iter().filter_map(|id| id.parse().ok()).collect()
+}
+
 pub async fn song_ids_by_isrc(pool: &PgPool, isrcs: &[String]) -> Result<Vec<String>, sqlx::Error> {
     if isrcs.is_empty() {
         return Ok(Vec::new());
@@ -35,7 +39,7 @@ pub async fn song_ids_by_isrc(pool: &PgPool, isrcs: &[String]) -> Result<Vec<Str
         .bind(&upper)
         .fetch_all(pool)
         .await?;
-    Ok(rows.into_iter().map(|r| r.get::<String, _>("id")).collect())
+    Ok(rows.into_iter().map(|r| r.get::<i64, _>("id").to_string()).collect())
 }
 
 pub async fn album_ids_by_upc(pool: &PgPool, upcs: &[String]) -> Result<Vec<String>, sqlx::Error> {
@@ -46,10 +50,11 @@ pub async fn album_ids_by_upc(pool: &PgPool, upcs: &[String]) -> Result<Vec<Stri
         .bind(upcs)
         .fetch_all(pool)
         .await?;
-    Ok(rows.into_iter().map(|r| r.get::<String, _>("id")).collect())
+    Ok(rows.into_iter().map(|r| r.get::<i64, _>("id").to_string()).collect())
 }
 
 pub async fn get_songs_by_ids(pool: &PgPool, ids: &[String]) -> Result<Vec<Song>, sqlx::Error> {
+    let ids = parse_ids(ids);
     if ids.is_empty() {
         return Ok(Vec::new());
     }
@@ -78,7 +83,7 @@ pub async fn get_songs_by_ids(pool: &PgPool, ids: &[String]) -> Result<Vec<Song>
                 SELECT
                     sa.song_id,
                     json_agg(json_build_object(
-                        'id', a.id,
+                        'id', a.id::text,
                         'name', a.name,
                         'image', COALESCE(artwork_url(a.image), ''),
                         'genres', COALESCE(to_json(aga.genres), '[]'::json)
@@ -107,7 +112,7 @@ pub async fn get_songs_by_ids(pool: &PgPool, ids: &[String]) -> Result<Vec<Song>
                 SELECT
                     aa.album_id,
                     json_agg(json_build_object(
-                        'id', a.id,
+                        'id', a.id::text,
                         'name', a.name,
                         'image', COALESCE(artwork_url(a.image), ''),
                         'genres', COALESCE(to_json(aaga.genres), '[]'::json)
@@ -135,7 +140,7 @@ pub async fn get_songs_by_ids(pool: &PgPool, ids: &[String]) -> Result<Vec<Song>
                 SELECT
                     sal.song_id,
                     json_agg(json_build_object(
-                        'id', al.id,
+                        'id', al.id::text,
                         'name', al.name,
                         'artist', COALESCE(ala.artists_json, '[]'::json),
                         'genres', COALESCE(to_json(alga.genres), '[]'::json),
@@ -195,7 +200,7 @@ fn song_from_row(r: sqlx::postgres::PgRow) -> Option<Song> {
     }
 
     Some(Song {
-        id: r.get("id"),
+        id: r.get::<i64, _>("id").to_string(),
         name: r.get("name"),
         artist: artists,
         album: albums,
@@ -214,6 +219,7 @@ pub async fn get_song_by_id(pool: &PgPool, id: &str) -> Result<Option<Song>, sql
 }
 
 pub async fn get_artists_by_ids(pool: &PgPool, ids: &[String]) -> Result<Vec<Artist>, sqlx::Error> {
+    let ids = parse_ids(ids);
     if ids.is_empty() {
         return Ok(Vec::new());
     }
@@ -233,7 +239,7 @@ pub async fn get_artists_by_ids(pool: &PgPool, ids: &[String]) -> Result<Vec<Art
     Ok(rows
         .into_iter()
         .map(|r| Artist {
-        id: r.get("id"),
+        id: r.get::<i64, _>("id").to_string(),
         name: r.get("name"),
         image: r.get("image"),
         genres: r.get::<Vec<String>, _>("genres"),
@@ -248,6 +254,7 @@ pub async fn get_artist_by_id(pool: &PgPool, id: &str) -> Result<Option<Artist>,
 
 
 pub async fn get_albums_by_ids(pool: &PgPool, ids: &[String]) -> Result<Vec<Album>, sqlx::Error> {
+    let ids = parse_ids(ids);
     if ids.is_empty() {
         return Ok(Vec::new());
     }
@@ -267,7 +274,7 @@ pub async fn get_albums_by_ids(pool: &PgPool, ids: &[String]) -> Result<Vec<Albu
                   COALESCE(to_char(al.date, 'YYYY-MM-DD'), '') AS date,
                   al.track_count, al.upc, al.label,
                   json_agg(json_build_object(
-                      'id', a.id,
+                      'id', a.id::text,
                       'name', a.name,
                       'image', COALESCE(artwork_url(a.image), ''),
                       'genres', COALESCE(to_json(aga.genres), '[]'::json)
@@ -303,7 +310,7 @@ fn album_from_row(r: sqlx::postgres::PgRow) -> Option<Album> {
     }
 
     Some(Album {
-        id: r.get("id"),
+        id: r.get::<i64, _>("id").to_string(),
         name: r.get("name"),
         artist: artists,
         genres: r.get::<Vec<String>, _>("genres"),

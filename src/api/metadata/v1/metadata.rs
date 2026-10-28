@@ -90,10 +90,7 @@ fn parse_id(raw: &str) -> Option<(String, String)> {
 }
 
 fn is_valid_omid(id: &str) -> bool {
-    id.len() == 16
-        && id
-            .chars()
-            .all(|c| c.is_ascii_digit() || c.is_ascii_lowercase())
+    id.len() <= 18 && id.parse::<i64>().is_ok_and(|n| n > 0) && id.bytes().all(|c| c.is_ascii_digit())
 }
 
 async fn stats_handler(State(state): State<SearchState>) -> impl IntoResponse {
