@@ -8,6 +8,7 @@ services:
       - DATABASE_URL=postgres://postgres:postgres@postgres:5432/vleer_api
       - SCRAPE_DATABASE_URL=postgres://postgres:postgres@host.docker.internal:5432/apple_music_scrape
       - MANTICORE_URL=http://manticore:9308
+      - METADATA_ENABLED=${METADATA_ENABLED:-true}
       - RUST_LOG=info
     extra_hosts:
       - "host.docker.internal:host-gateway"

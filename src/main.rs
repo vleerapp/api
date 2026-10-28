@@ -36,13 +36,20 @@ async fn main() {
 
     info!("database initialized and migrations applied");
 
+    let metadata_enabled = std::env::var("METADATA_ENABLED")
+        .map(|v| !matches!(v.trim().to_ascii_lowercase().as_str(), "false" | "0" | "off" | "no"))
+        .unwrap_or(true);
+    if !metadata_enabled {
+        warn!("METADATA_ENABLED is off, /metadata answers 503 and the scrape database is not touched");
+    }
+
     let scrape_db_url = std::env::var("SCRAPE_DATABASE_URL").unwrap_or_else(|_| {
         tracing::warn!("SCRAPE_DATABASE_URL not set, falling back to localhost:5432");
         "postgres://postgres:postgres@localhost:5432/apple_music_scrape".to_string()
     });
-    let scrape_pool = match scrape_db_url
-        .parse::<sqlx::postgres::PgConnectOptions>()
-        .map(|opts| {
+    let scrape_pool = match metadata_enabled.then(|| scrape_db_url.parse::<sqlx::postgres::PgConnectOptions>()) {
+        None => None,
+        Some(Ok(opts)) => {
             let probe = opts.clone();
             tokio::spawn(async move {
                 use sqlx::Connection;
@@ -50,19 +57,18 @@ async fn main() {
                     warn!("scrape database unreachable: {}", e);
                 }
             });
-            sqlx::postgres::PgPoolOptions::new()
-                .max_connections(8)
-                .acquire_timeout(std::time::Duration::from_secs(5))
-                .connect_lazy_with(opts.options([
-                    ("statement_timeout", "10000"),
-                    ("client_min_messages", "error"),
-                ]))
-        }) {
-        Ok(p) => {
             info!("scrape database pool created (lazy)");
-            Some(p)
+            Some(
+                sqlx::postgres::PgPoolOptions::new()
+                    .max_connections(8)
+                    .acquire_timeout(std::time::Duration::from_secs(5))
+                    .connect_lazy_with(opts.options([
+                        ("statement_timeout", "10000"),
+                        ("client_min_messages", "error"),
+                    ])),
+            )
         }
-        Err(e) => {
+        Some(Err(e)) => {
             warn!(
                 "scrape database unavailable, metadata endpoints will be disabled: {}",
                 e
@@ -73,7 +79,7 @@ async fn main() {
 
     let manticore = std::env::var("MANTICORE_URL")
         .ok()
-        .filter(|u| !u.trim().is_empty())
+        .filter(|u| metadata_enabled && !u.trim().is_empty())
         .and_then(|url| match manticore::Manticore::new(&url) {
             Ok(m) => {
                 info!("search backend: manticore at {}", url);
