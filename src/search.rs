@@ -148,13 +148,13 @@ pub fn shortlist(
     scored.into_iter().map(|(_, c)| c).collect()
 }
 
-pub fn best_match<'a>(
+fn scored<'a>(
     candidates: &'a [Candidate],
     name: &str,
     artist: Option<&str>,
     album: Option<&str>,
     duration: Option<i32>,
-) -> Option<&'a Candidate> {
+) -> Vec<(&'a Candidate, f64)> {
     let mut scorer = Scorer::new(candidates, name, artist, album);
 
     candidates
@@ -171,6 +171,69 @@ pub fn best_match<'a>(
             }
             (c, score)
         })
+        .collect()
+}
+
+pub fn best_match<'a>(
+    candidates: &'a [Candidate],
+    name: &str,
+    artist: Option<&str>,
+    album: Option<&str>,
+    duration: Option<i32>,
+) -> Option<&'a Candidate> {
+    scored(candidates, name, artist, album, duration)
+        .into_iter()
         .max_by(|(_, a), (_, b)| a.total_cmp(b))
         .map(|(c, _)| c)
+}
+
+pub fn rank<'a>(
+    candidates: &'a [Candidate],
+    name: &str,
+    artist: Option<&str>,
+    album: Option<&str>,
+    duration: Option<i32>,
+    limit: usize,
+) -> Vec<&'a Candidate> {
+    let mut all = scored(candidates, name, artist, album, duration);
+    all.reverse();
+    all.sort_by(|(_, a), (_, b)| b.total_cmp(a));
+    all.into_iter().take(limit).map(|(c, _)| c).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn candidate(id: &str, name: &str, artist: &str) -> Candidate {
+        Candidate {
+            id: id.to_string(),
+            name: name.to_string(),
+            artist: artist.to_string(),
+            album: "Album".to_string(),
+            popularity_score: 0.5,
+            duration: None,
+            album_tier: 0,
+        }
+    }
+
+    #[test]
+    fn rank_leads_with_best_match_including_ties() {
+        let candidates = vec![
+            candidate("1", "Song", "Artist"),
+            candidate("2", "Other", "Someone"),
+            candidate("3", "Song", "Artist"),
+        ];
+        let best = best_match(&candidates, "Song", Some("Artist"), None, None).unwrap();
+        let ranked = rank(&candidates, "Song", Some("Artist"), None, None, 3);
+        assert_eq!(ranked.len(), 3);
+        assert!(std::ptr::eq(ranked[0], best));
+        assert_eq!(ranked[2].id, "2");
+    }
+
+    #[test]
+    fn rank_respects_limit() {
+        let candidates = vec![candidate("1", "Song", "A"), candidate("2", "Song", "B")];
+        assert_eq!(rank(&candidates, "Song", None, None, None, 1).len(), 1);
+    }
 }

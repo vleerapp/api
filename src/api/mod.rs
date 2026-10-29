@@ -56,7 +56,7 @@ mod tests {
 
         let res = app
             .clone()
-            .oneshot(Request::get("/metadata/v1/stats").body(Body::empty()).unwrap())
+            .oneshot(Request::get("/metadata/v1/search/song").body(Body::empty()).unwrap())
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);

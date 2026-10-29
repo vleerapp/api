@@ -2,30 +2,6 @@ use sqlx::{PgPool, Row};
 
 use crate::models::metadata::{Album, Artist, Song};
 
-pub async fn stats(pool: &PgPool) -> Result<(i64, i64, i64), sqlx::Error> {
-    let rows = sqlx::query(
-        "SELECT GREATEST(0, reltuples)::bigint AS estimate, relname
-         FROM pg_class
-         WHERE oid IN ('songs'::regclass, 'albums'::regclass, 'artists'::regclass)",
-    )
-    .fetch_all(pool)
-    .await?;
-
-    let mut songs = 0i64;
-    let mut albums = 0i64;
-    let mut artists = 0i64;
-    for r in rows {
-        let estimate: i64 = r.get("estimate");
-        match r.get::<String, _>("relname").as_str() {
-            "songs" => songs = estimate,
-            "albums" => albums = estimate,
-            "artists" => artists = estimate,
-            _ => {}
-        }
-    }
-    Ok((songs, albums, artists))
-}
-
 fn parse_ids(ids: &[String]) -> Vec<i64> {
     ids.iter().filter_map(|id| id.parse().ok()).collect()
 }

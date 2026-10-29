@@ -20,6 +20,8 @@ pub struct SearchState {
 const MAX_LOOKUP_VALUES: usize = 100;
 const MATCH_CANDIDATES: i64 = 100;
 const ENRICH_CANDIDATES: usize = 20;
+const DEFAULT_SEARCH_LIMIT: i64 = 10;
+const MAX_SEARCH_LIMIT: i64 = 50;
 
 #[derive(Debug, Deserialize)]
 pub struct CatalogQuery {
@@ -36,12 +38,21 @@ pub struct IdentifyQuery {
     pub duration: Option<i32>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct SearchQuery {
+    pub name: Option<String>,
+    pub album: Option<String>,
+    pub artist: Option<String>,
+    pub duration: Option<i32>,
+    pub limit: Option<i64>,
+}
+
 pub fn router() -> Router<SearchState> {
     Router::new()
-        .route("/", axum::routing::get(stats_handler))
         .route("/catalog", axum::routing::get(catalog_collection_handler))
         .route("/catalog/{id}", axum::routing::get(catalog_single_handler))
         .route("/identify/{type}", axum::routing::get(identify_handler))
+        .route("/search/{type}", axum::routing::get(search_handler))
 }
 
 fn error_response(status: StatusCode, message: &str) -> (StatusCode, Json<Value>) {
@@ -91,18 +102,6 @@ fn parse_id(raw: &str) -> Option<(String, String)> {
 
 fn is_valid_omid(id: &str) -> bool {
     id.len() <= 18 && id.parse::<i64>().is_ok_and(|n| n > 0) && id.bytes().all(|c| c.is_ascii_digit())
-}
-
-async fn stats_handler(State(state): State<SearchState>) -> impl IntoResponse {
-    match db::metadata::stats(&state.scrape_pool).await {
-        Ok((songs, albums, artists)) => (
-            StatusCode::OK,
-            Json(json!({
-                "stats": { "songs": songs, "albums": albums, "artists": artists }
-            })),
-        ),
-        Err(e) => db_error_response(&e, "stats error", "Failed to load stats"),
-    }
 }
 
 async fn fetch_resource(
@@ -249,70 +248,97 @@ async fn catalog_single_handler(
     }
 }
 
+type MatchInputs<'a> = (&'a str, Option<&'a str>, Option<&'a str>);
+
+fn match_inputs<'a>(
+    item_type: &str,
+    name: &'a Option<String>,
+    artist: &'a Option<String>,
+    album: &'a Option<String>,
+) -> Result<MatchInputs<'a>, (StatusCode, Json<Value>)> {
+    if !matches!(item_type, "song" | "album" | "artist") {
+        return Err(error_response(StatusCode::BAD_REQUEST, "Invalid type"));
+    }
+
+    let Some(name) = name.as_deref().filter(|s| !s.is_empty()) else {
+        return Err(error_response(StatusCode::BAD_REQUEST, "name is required"));
+    };
+    if name.len() > 256 {
+        return Err(error_response(StatusCode::BAD_REQUEST, "name too long"));
+    }
+
+    let artist = artist.as_deref().filter(|s| !s.is_empty());
+    let album = album.as_deref().filter(|s| !s.is_empty());
+    if artist.is_some_and(|s| s.len() > 256) || album.is_some_and(|s| s.len() > 256) {
+        return Err(error_response(
+            StatusCode::BAD_REQUEST,
+            "query parameter too long",
+        ));
+    }
+
+    Ok(match item_type {
+        "song" => (name, artist, album),
+        "album" => (name, artist, None),
+        _ => (name, None, None),
+    })
+}
+
+async fn find_candidates(
+    state: &SearchState,
+    item_type: &str,
+    (name, artist, album): MatchInputs<'_>,
+    keep: usize,
+) -> Result<Vec<db::search::Candidate>, Option<StatusCode>> {
+    let engine = db::search::Engine {
+        pool: &state.scrape_pool,
+        manticore: state.manticore.as_deref(),
+    };
+    let mut candidates =
+        match db::search::candidates(engine, item_type, name, artist, MATCH_CANDIDATES).await {
+            Ok(result) => result,
+            Err(e) => {
+                let status = classify_db_error(&e);
+                if status.is_some() {
+                    tracing::error!("match error: {}", e);
+                } else {
+                    tracing::warn!("match query error, treating as no match: {}", e);
+                }
+                return Err(status);
+            }
+        };
+
+    if item_type == "song" {
+        candidates = search::shortlist(candidates, name, artist, album, keep);
+        if let Err(e) = db::search::enrich(&state.scrape_pool, &mut candidates).await {
+            let status = classify_db_error(&e);
+            if status.is_some() {
+                tracing::error!("enrich error: {}", e);
+            } else {
+                tracing::warn!("enrich error, treating as no match: {}", e);
+            }
+            return Err(status);
+        }
+    }
+
+    Ok(candidates)
+}
+
 async fn identify_handler(
     State(state): State<SearchState>,
     Path(item_type): Path<String>,
     Query(params): Query<IdentifyQuery>,
 ) -> impl IntoResponse {
-    if !matches!(item_type.as_str(), "song" | "album" | "artist") {
-        return error_response(StatusCode::BAD_REQUEST, "Invalid type").into_response();
-    }
-
-    let name = params.name.as_deref().filter(|s| !s.is_empty());
-    let Some(name) = name else {
-        return error_response(StatusCode::BAD_REQUEST, "name is required").into_response();
+    let inputs = match match_inputs(&item_type, &params.name, &params.artist, &params.album) {
+        Ok(inputs) => inputs,
+        Err(e) => return e.into_response(),
     };
-    if name.len() > 256 {
-        return error_response(StatusCode::BAD_REQUEST, "name too long").into_response();
-    }
+    let (name, artist, album) = inputs;
 
-    let artist = params.artist.as_deref().filter(|s| !s.is_empty());
-    let album = params.album.as_deref().filter(|s| !s.is_empty());
-    if artist.is_some_and(|s| s.len() > 256) || album.is_some_and(|s| s.len() > 256) {
-        return error_response(StatusCode::BAD_REQUEST, "query parameter too long").into_response();
-    }
-
-    let (artist, album) = match item_type.as_str() {
-        "song" => (artist, album),
-        "album" => (artist, None),
-        _ => (None, None),
+    let candidates = match find_candidates(&state, &item_type, inputs, ENRICH_CANDIDATES).await {
+        Ok(candidates) => candidates,
+        Err(None) => return error_response(StatusCode::NOT_FOUND, "No match found").into_response(),
+        Err(Some(status)) => return error_response(status, "Match failed").into_response(),
     };
-
-    let engine = db::search::Engine {
-        pool: &state.scrape_pool,
-        manticore: state.manticore.as_deref(),
-    };
-    let mut candidates = match db::search::candidates(
-        engine,
-        &item_type,
-        name,
-        artist,
-        MATCH_CANDIDATES,
-    )
-    .await
-    {
-        Ok(result) => result,
-        Err(e) => {
-            let Some(status) = classify_db_error(&e) else {
-                tracing::warn!("match query error, treating as no match: {}", e);
-                return error_response(StatusCode::NOT_FOUND, "No match found").into_response();
-            };
-            tracing::error!("match error: {}", e);
-            return error_response(status, "Match failed").into_response();
-        }
-    };
-
-    if item_type == "song" {
-        candidates = search::shortlist(candidates, name, artist, album, ENRICH_CANDIDATES);
-        if let Err(e) = db::search::enrich(&state.scrape_pool, &mut candidates).await {
-            let Some(status) = classify_db_error(&e) else {
-                tracing::warn!("enrich error, treating as no match: {}", e);
-                return error_response(StatusCode::NOT_FOUND, "No match found").into_response();
-            };
-            tracing::error!("enrich error: {}", e);
-            return error_response(status, "Match failed").into_response();
-        }
-    }
 
     let Some(matched) = search::best_match(
         &candidates,
@@ -334,4 +360,60 @@ async fn identify_handler(
         Ok(None) => error_response(StatusCode::NOT_FOUND, "No match found").into_response(),
         Err(e) => db_error_response(&e, "match error", "Match failed").into_response(),
     }
+}
+
+async fn search_handler(
+    State(state): State<SearchState>,
+    Path(item_type): Path<String>,
+    Query(params): Query<SearchQuery>,
+) -> impl IntoResponse {
+    let inputs = match match_inputs(&item_type, &params.name, &params.artist, &params.album) {
+        Ok(inputs) => inputs,
+        Err(e) => return e.into_response(),
+    };
+    let (name, artist, album) = inputs;
+    let limit = params.limit.unwrap_or(DEFAULT_SEARCH_LIMIT);
+    if !(1..=MAX_SEARCH_LIMIT).contains(&limit) {
+        return error_response(StatusCode::BAD_REQUEST, "limit must be between 1 and 50")
+            .into_response();
+    }
+
+    let candidates = match find_candidates(&state, &item_type, inputs, ENRICH_CANDIDATES.max(limit as usize))
+        .await
+    {
+        Ok(candidates) => candidates,
+        Err(None) => return (StatusCode::OK, Json(json!({ "data": [] }))).into_response(),
+        Err(Some(status)) => return error_response(status, "Search failed").into_response(),
+    };
+
+    let ranked = search::rank(
+        &candidates,
+        name,
+        artist,
+        album,
+        params
+            .duration
+            .filter(|_| item_type == "song" && params.duration > Some(0)),
+        limit as usize,
+    );
+    let ids: Vec<String> = ranked.iter().map(|c| c.id.clone()).collect();
+
+    let rendered: Result<Vec<(String, Value)>, sqlx::Error> = match item_type.as_str() {
+        "song" => db::metadata::get_songs_by_ids(&state.scrape_pool, &ids)
+            .await
+            .map(|v| v.iter().map(|x| (x.id.clone(), render_song(x))).collect()),
+        "album" => db::metadata::get_albums_by_ids(&state.scrape_pool, &ids)
+            .await
+            .map(|v| v.iter().map(|x| (x.id.clone(), render_album(x))).collect()),
+        _ => db::metadata::get_artists_by_ids(&state.scrape_pool, &ids)
+            .await
+            .map(|v| v.iter().map(|x| (x.id.clone(), render_artist(x))).collect()),
+    };
+    let rendered: std::collections::HashMap<String, Value> = match rendered {
+        Ok(v) => v.into_iter().collect(),
+        Err(e) => return db_error_response(&e, "search error", "Search failed").into_response(),
+    };
+
+    let data: Vec<&Value> = ids.iter().filter_map(|id| rendered.get(id)).collect();
+    (StatusCode::OK, Json(json!({ "data": data }))).into_response()
 }
