@@ -22,27 +22,37 @@ pub async fn create_pool() -> Result<PgPool, sqlx::Error> {
         ));
     }
 
-    let admin = PgPoolOptions::new()
+    let probe = PgPoolOptions::new()
         .max_connections(1)
-        .connect_with(opts.clone().database("postgres"))
-        .await?;
+        .connect_with(opts.clone())
+        .await;
 
-    let exists: bool =
-        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_database WHERE datname = $1)")
-            .bind(&db_name)
-            .fetch_one(&admin)
+    match probe {
+        Ok(p) => p.close().await,
+        Err(sqlx::Error::Database(e)) if e.code().as_deref() == Some("3D000") => {
+            let admin = match PgPoolOptions::new()
+                .max_connections(1)
+                .connect_with(opts.clone().database("postgres"))
+                .await
+            {
+                Ok(p) => p,
+                Err(_) => {
+                    PgPoolOptions::new()
+                        .max_connections(1)
+                        .connect_with(opts.clone().database("template1"))
+                        .await?
+                }
+            };
+            let escaped = db_name.replace('"', "\"\"");
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "CREATE DATABASE \"{escaped}\""
+            )))
+            .execute(&admin)
             .await?;
-
-    if !exists {
-        let escaped = db_name.replace('"', "\"\"");
-        sqlx::query(sqlx::AssertSqlSafe(format!(
-            "CREATE DATABASE \"{escaped}\""
-        )))
-        .execute(&admin)
-        .await?;
+            admin.close().await;
+        }
+        Err(e) => return Err(e),
     }
-
-    admin.close().await;
 
     let pool = PgPoolOptions::new()
         .max_connections(50)
