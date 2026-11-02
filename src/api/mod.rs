@@ -1,3 +1,4 @@
+use crate::manticore::Manticore;
 use axum::{
     Json, Router,
     body::Body,
@@ -7,7 +8,6 @@ use axum::{
     routing::any,
 };
 use serde_json::json;
-use crate::manticore::Manticore;
 use sqlx::PgPool;
 use std::sync::Arc;
 
@@ -21,7 +21,9 @@ async fn metadata_unavailable() -> impl IntoResponse {
     (
         StatusCode::SERVICE_UNAVAILABLE,
         [(header::RETRY_AFTER, "600")],
-        Json(json!({ "error": { "status": 503, "message": "metadata is temporarily unavailable" } })),
+        Json(
+            json!({ "error": { "status": 503, "message": "metadata is temporarily unavailable" } }),
+        ),
     )
 }
 
@@ -56,7 +58,11 @@ mod tests {
 
         let res = app
             .clone()
-            .oneshot(Request::get("/metadata/v1/search/song").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::get("/metadata/v1/search/song")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
@@ -67,5 +73,22 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn search_answers_503_without_manticore() {
+        let pool = PgPool::connect_lazy("postgres://x@localhost/x").unwrap();
+        let scrape_pool = PgPool::connect_lazy("postgres://x@localhost/x").unwrap();
+        let app = app_router(pool, Some(scrape_pool), None);
+
+        let res = app
+            .oneshot(
+                Request::get("/metadata/v1/search/song?name=test")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 }

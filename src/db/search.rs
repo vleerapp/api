@@ -2,12 +2,6 @@ use sqlx::{PgPool, Row};
 
 use crate::manticore::{Manticore, words};
 
-#[derive(Clone, Copy)]
-pub struct Engine<'a> {
-    pub pool: &'a PgPool,
-    pub manticore: Option<&'a Manticore>,
-}
-
 fn engine_error(e: anyhow::Error) -> sqlx::Error {
     sqlx::Error::Io(std::io::Error::other(e.to_string()))
 }
@@ -33,17 +27,7 @@ enum Mode {
     Fast,
     ExactAll,
     ExactAny,
-    FuzzyName,
-    FuzzyArtist,
     FuzzyBoth,
-}
-
-fn clause(column: &str, param: usize, op: &str, fuzzy: bool) -> String {
-    if fuzzy {
-        format!("{column} {op} ${param}::text::pdb.fuzzy(1, f, t)")
-    } else {
-        format!("{column} {op} ${param}::text")
-    }
 }
 
 const FUZZY_MIN_LEN: usize = 4;
@@ -74,17 +58,17 @@ fn artist_matches(found: &[Candidate], wanted: Option<&str>) -> bool {
 }
 
 pub async fn candidates(
-    engine: Engine<'_>,
+    manticore: &Manticore,
     item_type: &str,
     name: &str,
     artist: Option<&str>,
     limit: i64,
 ) -> Result<Vec<Candidate>, sqlx::Error> {
-    find(engine, item_type, name, artist, limit).await
+    find(manticore, item_type, name, artist, limit).await
 }
 
 async fn find(
-    engine: Engine<'_>,
+    manticore: &Manticore,
     item_type: &str,
     name: &str,
     artist: Option<&str>,
@@ -93,7 +77,7 @@ async fn find(
     let mut known = None;
     if item_type == "artist" {
         return candidates_in(
-            engine,
+            manticore,
             Scope::Full,
             false,
             &mut known,
@@ -106,7 +90,7 @@ async fn find(
     }
     let wanted = artist.map(str::to_lowercase);
     let hot = candidates_in(
-        engine,
+        manticore,
         Scope::Hot,
         false,
         &mut known,
@@ -121,7 +105,7 @@ async fn find(
     }
     let strict = !hot.is_empty();
     let full = candidates_in(
-        engine,
+        manticore,
         Scope::Full,
         strict,
         &mut known,
@@ -139,7 +123,7 @@ async fn find(
 
 #[allow(clippy::too_many_arguments)]
 async fn candidates_in(
-    engine: Engine<'_>,
+    manticore: &Manticore,
     scope: Scope,
     strict: bool,
     artist_known: &mut Option<bool>,
@@ -153,7 +137,8 @@ async fn candidates_in(
     let mut fast = Vec::new();
 
     if wanted_artist.is_some() && item_type != "artist" {
-        let found = run(engine, scope, item_type, name, artist, limit, Mode::Fast).await?;
+        let found =
+            run_manticore(manticore, scope, item_type, name, artist, limit, Mode::Fast).await?;
         let wanted = wanted_artist.as_deref().unwrap_or_default();
         if found
             .iter()
@@ -170,7 +155,8 @@ async fn candidates_in(
             continue;
         }
         let found = if matches!(mode, Mode::ExactAll) && wanted_artist.is_some() {
-            let mut merged = run(engine, scope, item_type, name, None, limit, mode).await?;
+            let mut merged =
+                run_manticore(manticore, scope, item_type, name, None, limit, mode).await?;
             let seen: std::collections::HashSet<String> =
                 merged.iter().map(|c| c.id.clone()).collect();
             merged.extend(
@@ -181,7 +167,7 @@ async fn candidates_in(
             merged.sort_by(|a, b| a.id.cmp(&b.id));
             merged
         } else {
-            run(engine, scope, item_type, name, artist, limit, mode).await?
+            run_manticore(manticore, scope, item_type, name, artist, limit, mode).await?
         };
         if found.is_empty() {
             continue;
@@ -200,162 +186,30 @@ async fn candidates_in(
     let artist_exists = match (*artist_known, artist) {
         (Some(known), _) => known,
         (None, Some(a)) if item_type != "artist" => {
-            let exists = match engine.manticore {
-                Some(m) => {
-                    let w = words(a);
-                    !w.is_empty()
-                        && m.exists("search_artists", &format!("@name ({})", w.join(" ")))
-                            .await
-                            .map_err(engine_error)?
-                }
-                None => sqlx::query_scalar::<_, i32>(
-                    "SELECT 1 FROM artists WHERE name &&& $1::text LIMIT 1",
-                )
-                .persistent(false)
-                .bind(a)
-                .fetch_optional(engine.pool)
-                .await?
-                .is_some(),
-            };
+            let w = words(a);
+            let exists = !w.is_empty()
+                && manticore
+                    .exists("search_artists", &format!("@name ({})", w.join(" ")))
+                    .await
+                    .map_err(engine_error)?;
             *artist_known = Some(exists);
             exists
         }
         _ => false,
     };
-    let fuzzy_modes: &[Mode] = if engine.manticore.is_some() {
-        if strict && !artist_exists {
-            &[]
-        } else {
-            &[Mode::FuzzyBoth]
-        }
-    } else if strict {
-        if artist_exists {
-            &[Mode::FuzzyName]
-        } else {
-            &[]
-        }
-    } else if artist_exists {
-        &[Mode::FuzzyName, Mode::FuzzyBoth]
-    } else if artist.is_some() && item_type != "artist" && !fallback.is_empty() {
-        &[Mode::FuzzyArtist, Mode::FuzzyBoth]
+    let fuzzy_modes: &[Mode] = if strict && !artist_exists {
+        &[]
     } else {
         &[Mode::FuzzyBoth]
     };
     for &mode in fuzzy_modes {
-        let found = run(engine, scope, item_type, name, artist, limit, mode).await?;
+        let found = run_manticore(manticore, scope, item_type, name, artist, limit, mode).await?;
         if !found.is_empty() {
             return Ok(found);
         }
     }
 
     Ok(fallback)
-}
-
-async fn run(
-    engine: Engine<'_>,
-    scope: Scope,
-    item_type: &str,
-    name: &str,
-    artist: Option<&str>,
-    limit: i64,
-    mode: Mode,
-) -> Result<Vec<Candidate>, sqlx::Error> {
-    if let Some(m) = engine.manticore {
-        return run_manticore(m, scope, item_type, name, artist, limit, mode).await;
-    }
-    let pool = engine.pool;
-    let (table, artist_col, album_col, pop_col) = match item_type {
-        "song" if scope == Scope::Hot => (
-            "search_songs_hot",
-            "artist_names",
-            "album_name",
-            "popularity",
-        ),
-        "song" => ("search_songs", "artist_names", "album_name", "popularity"),
-        "album" if scope == Scope::Hot => (
-            "search_albums_hot",
-            "artist_names",
-            "''::text",
-            "popularity",
-        ),
-        "album" => ("search_albums", "artist_names", "''::text", "popularity"),
-        _ => ("artists", "''::text", "''::text", "popularity_score"),
-    };
-    let artist = artist.filter(|_| artist_col == "artist_names");
-
-    let (name_clause, artist_clause) = match mode {
-        Mode::Fast | Mode::ExactAll => (
-            clause("name", 1, "&&&", false),
-            clause("artist_names", 3, "&&&", false),
-        ),
-        Mode::ExactAny => (
-            clause("name", 1, "|||", false),
-            clause("artist_names", 3, "&&&", false),
-        ),
-        Mode::FuzzyName => (
-            clause("name", 1, "&&&", true),
-            clause("artist_names", 3, "&&&", false),
-        ),
-        Mode::FuzzyArtist => (
-            clause("name", 1, "&&&", false),
-            clause("artist_names", 3, "&&&", true),
-        ),
-        Mode::FuzzyBoth => (
-            clause("name", 1, "&&&", true),
-            clause("artist_names", 3, "&&&", true),
-        ),
-    };
-
-    let select = format!(
-        "SELECT id, name, {artist_col} AS artist_name, {album_col} AS album_name, \
-         COALESCE({pop_col}, 0)::float8 AS pop FROM {table}"
-    );
-    let order = format!("ORDER BY pdb.score(id) DESC, {pop_col} DESC LIMIT $2");
-
-    let sql = match artist {
-        Some(_) => format!("{select} WHERE {name_clause} AND {artist_clause} {order}"),
-        None => format!("{select} WHERE {name_clause} {order}"),
-    };
-
-    let (name_fuzzy, artist_fuzzy) = match mode {
-        Mode::FuzzyName => (true, false),
-        Mode::FuzzyArtist => (false, true),
-        Mode::FuzzyBoth => (true, true),
-        _ => (false, false),
-    };
-    let name_arg = if name_fuzzy {
-        fuzzy_terms(name)
-    } else {
-        name.to_string()
-    };
-    let mut query = sqlx::query(sqlx::AssertSqlSafe(sql))
-        .persistent(false)
-        .bind(name_arg)
-        .bind(limit);
-    if let Some(a) = artist {
-        query = query.bind(if artist_fuzzy {
-            fuzzy_terms(a)
-        } else {
-            a.to_string()
-        });
-    }
-
-    let found: Vec<Candidate> = query
-        .fetch_all(pool)
-        .await?
-        .into_iter()
-        .map(|r| Candidate {
-            id: r.get::<i64, _>(0).to_string(),
-            name: r.get(1),
-            artist: r.get(2),
-            album: r.get(3),
-            popularity_score: r.get(4),
-            duration: None,
-            album_tier: 0,
-        })
-        .collect();
-
-    Ok(found)
 }
 
 async fn run_manticore(
@@ -375,7 +229,7 @@ async fn run_manticore(
         _ => "search_artists",
     };
     let artist = artist.filter(|_| item_type != "artist");
-    let fuzzy = matches!(mode, Mode::FuzzyName | Mode::FuzzyArtist | Mode::FuzzyBoth);
+    let fuzzy = matches!(mode, Mode::FuzzyBoth);
 
     let expression = if fuzzy {
         let mut terms = words(&fuzzy_terms(name));

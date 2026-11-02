@@ -101,7 +101,9 @@ fn parse_id(raw: &str) -> Option<(String, String)> {
 }
 
 fn is_valid_omid(id: &str) -> bool {
-    id.len() <= 18 && id.parse::<i64>().is_ok_and(|n| n > 0) && id.bytes().all(|c| c.is_ascii_digit())
+    id.len() <= 18
+        && id.parse::<i64>().is_ok_and(|n| n > 0)
+        && id.bytes().all(|c| c.is_ascii_digit())
 }
 
 async fn fetch_resource(
@@ -211,12 +213,18 @@ async fn catalog_collection_handler(
         }
     };
 
-    let songs: std::collections::HashMap<_, _> =
-        songs.iter().map(|x| (x.id.as_str(), render_song(x))).collect();
-    let albums: std::collections::HashMap<_, _> =
-        albums.iter().map(|x| (x.id.as_str(), render_album(x))).collect();
-    let artists: std::collections::HashMap<_, _> =
-        artists.iter().map(|x| (x.id.as_str(), render_artist(x))).collect();
+    let songs: std::collections::HashMap<_, _> = songs
+        .iter()
+        .map(|x| (x.id.as_str(), render_song(x)))
+        .collect();
+    let albums: std::collections::HashMap<_, _> = albums
+        .iter()
+        .map(|x| (x.id.as_str(), render_album(x)))
+        .collect();
+    let artists: std::collections::HashMap<_, _> = artists
+        .iter()
+        .map(|x| (x.id.as_str(), render_artist(x)))
+        .collect();
 
     let data: Vec<Value> = resolved
         .iter()
@@ -289,12 +297,12 @@ async fn find_candidates(
     (name, artist, album): MatchInputs<'_>,
     keep: usize,
 ) -> Result<Vec<db::search::Candidate>, Option<StatusCode>> {
-    let engine = db::search::Engine {
-        pool: &state.scrape_pool,
-        manticore: state.manticore.as_deref(),
+    let Some(manticore) = state.manticore.as_deref() else {
+        tracing::error!("search unavailable: MANTICORE_URL is not configured");
+        return Err(Some(StatusCode::SERVICE_UNAVAILABLE));
     };
     let mut candidates =
-        match db::search::candidates(engine, item_type, name, artist, MATCH_CANDIDATES).await {
+        match db::search::candidates(manticore, item_type, name, artist, MATCH_CANDIDATES).await {
             Ok(result) => result,
             Err(e) => {
                 let status = classify_db_error(&e);
@@ -336,7 +344,9 @@ async fn identify_handler(
 
     let candidates = match find_candidates(&state, &item_type, inputs, ENRICH_CANDIDATES).await {
         Ok(candidates) => candidates,
-        Err(None) => return error_response(StatusCode::NOT_FOUND, "No match found").into_response(),
+        Err(None) => {
+            return error_response(StatusCode::NOT_FOUND, "No match found").into_response();
+        }
         Err(Some(status)) => return error_response(status, "Match failed").into_response(),
     };
 
@@ -378,8 +388,13 @@ async fn search_handler(
             .into_response();
     }
 
-    let candidates = match find_candidates(&state, &item_type, inputs, ENRICH_CANDIDATES.max(limit as usize))
-        .await
+    let candidates = match find_candidates(
+        &state,
+        &item_type,
+        inputs,
+        ENRICH_CANDIDATES.max(limit as usize),
+    )
+    .await
     {
         Ok(candidates) => candidates,
         Err(None) => return (StatusCode::OK, Json(json!({ "data": [] }))).into_response(),
