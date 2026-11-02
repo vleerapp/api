@@ -15,7 +15,10 @@ pub async fn song_ids_by_isrc(pool: &PgPool, isrcs: &[String]) -> Result<Vec<Str
         .bind(&upper)
         .fetch_all(pool)
         .await?;
-    Ok(rows.into_iter().map(|r| r.get::<i64, _>("id").to_string()).collect())
+    Ok(rows
+        .into_iter()
+        .map(|r| r.get::<i64, _>("id").to_string())
+        .collect())
 }
 
 pub async fn album_ids_by_upc(pool: &PgPool, upcs: &[String]) -> Result<Vec<String>, sqlx::Error> {
@@ -26,7 +29,10 @@ pub async fn album_ids_by_upc(pool: &PgPool, upcs: &[String]) -> Result<Vec<Stri
         .bind(upcs)
         .fetch_all(pool)
         .await?;
-    Ok(rows.into_iter().map(|r| r.get::<i64, _>("id").to_string()).collect())
+    Ok(rows
+        .into_iter()
+        .map(|r| r.get::<i64, _>("id").to_string())
+        .collect())
 }
 
 pub async fn get_songs_by_ids(pool: &PgPool, ids: &[String]) -> Result<Vec<Song>, sqlx::Error> {
@@ -159,7 +165,6 @@ pub async fn get_songs_by_ids(pool: &PgPool, ids: &[String]) -> Result<Vec<Song>
 }
 
 fn song_from_row(r: sqlx::postgres::PgRow) -> Option<Song> {
-
     let artists_json: Option<serde_json::Value> = r.get("artists_json");
     let albums_json: Option<serde_json::Value> = r.get("albums_json");
     let artists: Vec<Artist> = match artists_json {
@@ -191,7 +196,10 @@ fn song_from_row(r: sqlx::postgres::PgRow) -> Option<Song> {
 }
 
 pub async fn get_song_by_id(pool: &PgPool, id: &str) -> Result<Option<Song>, sqlx::Error> {
-    Ok(get_songs_by_ids(pool, &[id.to_string()]).await?.into_iter().next())
+    Ok(get_songs_by_ids(pool, &[id.to_string()])
+        .await?
+        .into_iter()
+        .next())
 }
 
 pub async fn get_artists_by_ids(pool: &PgPool, ids: &[String]) -> Result<Vec<Artist>, sqlx::Error> {
@@ -215,19 +223,20 @@ pub async fn get_artists_by_ids(pool: &PgPool, ids: &[String]) -> Result<Vec<Art
     Ok(rows
         .into_iter()
         .map(|r| Artist {
-        id: r.get::<i64, _>("id").to_string(),
-        name: r.get("name"),
-        image: r.get("image"),
-        genres: r.get::<Vec<String>, _>("genres"),
+            id: r.get::<i64, _>("id").to_string(),
+            name: r.get("name"),
+            image: r.get("image"),
+            genres: r.get::<Vec<String>, _>("genres"),
         })
         .collect())
 }
 
 pub async fn get_artist_by_id(pool: &PgPool, id: &str) -> Result<Option<Artist>, sqlx::Error> {
-    Ok(get_artists_by_ids(pool, &[id.to_string()]).await?.into_iter().next())
+    Ok(get_artists_by_ids(pool, &[id.to_string()])
+        .await?
+        .into_iter()
+        .next())
 }
-
-
 
 pub async fn get_albums_by_ids(pool: &PgPool, ids: &[String]) -> Result<Vec<Album>, sqlx::Error> {
     let ids = parse_ids(ids);
@@ -274,7 +283,6 @@ pub async fn get_albums_by_ids(pool: &PgPool, ids: &[String]) -> Result<Vec<Albu
 }
 
 fn album_from_row(r: sqlx::postgres::PgRow) -> Option<Album> {
-
     let artists_json: Option<serde_json::Value> = r.get("artists_json");
     let artists: Vec<Artist> = match artists_json {
         Some(v) => serde_json::from_value(v).unwrap_or_default(),
@@ -299,5 +307,8 @@ fn album_from_row(r: sqlx::postgres::PgRow) -> Option<Album> {
 }
 
 pub async fn get_album_by_id(pool: &PgPool, id: &str) -> Result<Option<Album>, sqlx::Error> {
-    Ok(get_albums_by_ids(pool, &[id.to_string()]).await?.into_iter().next())
+    Ok(get_albums_by_ids(pool, &[id.to_string()])
+        .await?
+        .into_iter()
+        .next())
 }

@@ -1,7 +1,7 @@
 use crate::manticore::Manticore;
 use axum::Router;
-use std::sync::Arc;
 use sqlx::PgPool;
+use std::sync::Arc;
 
 pub mod v1;
 

@@ -94,7 +94,12 @@ pub fn render_song(s: &Song) -> Value {
     let mut rels = Map::new();
     rels.insert(
         "albums".to_string(),
-        rel_list(s.album.iter().map(|x| render_album_inner(x, false)).collect()),
+        rel_list(
+            s.album
+                .iter()
+                .map(|x| render_album_inner(x, false))
+                .collect(),
+        ),
     );
     rels.insert(
         "artists".to_string(),
