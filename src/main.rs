@@ -10,6 +10,7 @@ use crate::rate_limit::rate_limit;
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
 use axum::http::{HeaderValue, Method, header};
+use sqlx::ConnectOptions;
 use std::net::SocketAddr;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tracing::{error, info, warn};
@@ -57,36 +58,41 @@ async fn main() {
         tracing::warn!("SCRAPE_DATABASE_URL not set, falling back to localhost:5432");
         "postgres://postgres:postgres@localhost:5432/apple_music_scrape".to_string()
     });
-    let scrape_pool =
-        match metadata_enabled.then(|| scrape_db_url.parse::<sqlx::postgres::PgConnectOptions>()) {
-            None => None,
-            Some(Ok(opts)) => {
-                let probe = opts.clone();
-                tokio::spawn(async move {
-                    use sqlx::Connection;
-                    if let Err(e) = sqlx::postgres::PgConnection::connect_with(&probe).await {
-                        warn!("scrape database unreachable: {}", e);
-                    }
-                });
-                info!("scrape database pool created (lazy)");
-                Some(
-                    sqlx::postgres::PgPoolOptions::new()
-                        .max_connections(8)
-                        .acquire_timeout(std::time::Duration::from_secs(5))
-                        .connect_lazy_with(opts.options([
-                            ("statement_timeout", "10000"),
-                            ("client_min_messages", "error"),
-                        ])),
-                )
-            }
-            Some(Err(e)) => {
-                warn!(
-                    "scrape database unavailable, metadata endpoints will be disabled: {}",
-                    e
-                );
-                None
-            }
-        };
+    let scrape_pool = match metadata_enabled
+        .then(|| scrape_db_url.parse::<sqlx::postgres::PgConnectOptions>())
+    {
+        None => None,
+        Some(Ok(opts)) => {
+            let probe = opts.clone();
+            tokio::spawn(async move {
+                use sqlx::Connection;
+                if let Err(e) = sqlx::postgres::PgConnection::connect_with(&probe).await {
+                    warn!("scrape database unreachable: {}", e);
+                }
+            });
+            info!("scrape database pool created (lazy)");
+            Some(
+                sqlx::postgres::PgPoolOptions::new()
+                    .max_connections(8)
+                    .acquire_timeout(std::time::Duration::from_secs(5))
+                    .connect_lazy_with(
+                        opts.log_statements(log::LevelFilter::Off)
+                            .log_slow_statements(log::LevelFilter::Off, std::time::Duration::ZERO)
+                            .options([
+                                ("statement_timeout", "10000"),
+                                ("client_min_messages", "error"),
+                            ]),
+                    ),
+            )
+        }
+        Some(Err(e)) => {
+            warn!(
+                "scrape database unavailable, metadata endpoints will be disabled: {}",
+                e
+            );
+            None
+        }
+    };
 
     let index = if metadata_enabled {
         match index::SearchIndex::open(std::path::Path::new(INDEX_DIR)) {

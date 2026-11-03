@@ -3458,6 +3458,7 @@ dependencies = [
  "dotenvy",
  "fst",
  "governor",
+ "log",
  "memmap2",
  "nucleo-matcher",
  "regex",
