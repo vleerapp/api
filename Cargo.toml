@@ -31,3 +31,7 @@ reqwest = { version = "0.13.5", features = ["json", "form"] }
 strsim = "0.11.1"
 nucleo-matcher = "0.3.1"
 anyhow = "1.0.104"
+tantivy = "0.27.0"
+fst = { version = "0.4.7", features = ["levenshtein"] }
+memmap2 = "0.9.12"
+clap = { version = "4.6.7", features = ["derive", "env"] }

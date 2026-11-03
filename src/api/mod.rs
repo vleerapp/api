@@ -1,4 +1,4 @@
-use crate::manticore::Manticore;
+use crate::index::SearchIndex;
 use axum::{
     Json, Router,
     body::Body,
@@ -30,7 +30,7 @@ async fn metadata_unavailable() -> impl IntoResponse {
 pub fn app_router(
     pool: PgPool,
     scrape_pool: Option<PgPool>,
-    manticore: Option<Arc<Manticore>>,
+    index: Option<Arc<SearchIndex>>,
 ) -> Router {
     let mut router = Router::new()
         .nest("/telemetry", telemetry::router().with_state(pool))
@@ -39,7 +39,7 @@ pub fn app_router(
         .route("/", any(|_: Request<Body>| async { "Healthy" }));
 
     router = match scrape_pool {
-        Some(pool) => router.nest("/metadata", metadata::router(pool, manticore)),
+        Some(pool) => router.nest("/metadata", metadata::router(pool, index)),
         None => router.nest("/metadata", Router::new().fallback(metadata_unavailable)),
     };
 
@@ -76,7 +76,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn search_answers_503_without_manticore() {
+    async fn search_answers_503_without_index() {
         let pool = PgPool::connect_lazy("postgres://x@localhost/x").unwrap();
         let scrape_pool = PgPool::connect_lazy("postgres://x@localhost/x").unwrap();
         let app = app_router(pool, Some(scrape_pool), None);

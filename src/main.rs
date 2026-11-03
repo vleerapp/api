@@ -1,6 +1,7 @@
 mod api;
 mod db;
-mod manticore;
+#[allow(dead_code)]
+mod index;
 mod models;
 mod rate_limit;
 mod search;
@@ -13,6 +14,8 @@ use std::net::SocketAddr;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tracing::{error, info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+
+const INDEX_DIR: &str = "index";
 
 #[tokio::main]
 async fn main() {
@@ -85,26 +88,14 @@ async fn main() {
             }
         };
 
-    let manticore = if metadata_enabled {
-        match std::env::var("MANTICORE_URL")
-            .ok()
-            .filter(|u| !u.trim().is_empty())
-        {
-            Some(url) => match manticore::Manticore::new(&url) {
-                Ok(m) => {
-                    info!("search backend: manticore at {}", url);
-                    Some(std::sync::Arc::new(m))
-                }
-                Err(e) => {
-                    warn!(
-                        "manticore unavailable, search and identify answer 503: {}",
-                        e
-                    );
-                    None
-                }
-            },
-            None => {
-                warn!("MANTICORE_URL not set, search and identify answer 503");
+    let index = if metadata_enabled {
+        match index::SearchIndex::open(std::path::Path::new(INDEX_DIR)) {
+            Ok(i) => {
+                info!("search backend: tantivy at {}", INDEX_DIR);
+                Some(std::sync::Arc::new(i))
+            }
+            Err(e) => {
+                warn!("search index unavailable, search and identify answer 503: {e:#}");
                 None
             }
         }
@@ -131,7 +122,7 @@ async fn main() {
         .allow_headers([header::CONTENT_TYPE]);
 
     let app = Router::new()
-        .merge(api::app_router(pool, scrape_pool, manticore))
+        .merge(api::app_router(pool, scrape_pool, index))
         .layer(cors)
         .layer(DefaultBodyLimit::max(64 * 1024))
         .layer(rate_limit(20, 1000));

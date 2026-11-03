@@ -14,14 +14,14 @@ use crate::{db, search};
 #[derive(Clone)]
 pub struct SearchState {
     pub scrape_pool: PgPool,
-    pub manticore: Option<std::sync::Arc<crate::manticore::Manticore>>,
+    pub index: Option<std::sync::Arc<crate::index::SearchIndex>>,
 }
 
 const MAX_LOOKUP_VALUES: usize = 100;
 const MATCH_CANDIDATES: i64 = 100;
 const ENRICH_CANDIDATES: usize = 20;
 const DEFAULT_SEARCH_LIMIT: i64 = 10;
-const MAX_SEARCH_LIMIT: i64 = 50;
+const MAX_SEARCH_LIMIT: i64 = 10;
 
 #[derive(Debug, Deserialize)]
 pub struct CatalogQuery {
@@ -297,12 +297,12 @@ async fn find_candidates(
     (name, artist, album): MatchInputs<'_>,
     keep: usize,
 ) -> Result<Vec<db::search::Candidate>, Option<StatusCode>> {
-    let Some(manticore) = state.manticore.as_deref() else {
-        tracing::error!("search unavailable: MANTICORE_URL is not configured");
+    let Some(index) = state.index.as_ref() else {
+        tracing::error!("search unavailable: index is not loaded");
         return Err(Some(StatusCode::SERVICE_UNAVAILABLE));
     };
     let mut candidates =
-        match db::search::candidates(manticore, item_type, name, artist, MATCH_CANDIDATES).await {
+        match db::search::candidates(index, item_type, name, artist, MATCH_CANDIDATES).await {
             Ok(result) => result,
             Err(e) => {
                 let status = classify_db_error(&e);
@@ -384,7 +384,7 @@ async fn search_handler(
     let (name, artist, album) = inputs;
     let limit = params.limit.unwrap_or(DEFAULT_SEARCH_LIMIT);
     if !(1..=MAX_SEARCH_LIMIT).contains(&limit) {
-        return error_response(StatusCode::BAD_REQUEST, "limit must be between 1 and 50")
+        return error_response(StatusCode::BAD_REQUEST, "limit must be between 1 and 10")
             .into_response();
     }
 
