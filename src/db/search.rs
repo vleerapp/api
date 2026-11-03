@@ -55,27 +55,34 @@ pub async fn scoped_candidates(
     item_type: &str,
     scope: Scope,
 ) -> Result<Vec<Candidate>, sqlx::Error> {
-    let query = match item_type {
-        "song" => sqlx::query(
-            "SELECT s.id, s.name, COALESCE(s.popularity, 0)::float8 AS popularity,
+    let song_select = "SELECT s.id, s.name, COALESCE(s.popularity, 0)::float8 AS popularity,
                     COALESCE((SELECT string_agg(al.name, ', ' ORDER BY al.name)
                               FROM song_albums sal JOIN albums al ON al.id = sal.album_id
-                              WHERE sal.song_id = s.id), '') AS album
-             FROM songs s
-             WHERE ($1::bigint IS NULL OR s.id IN (
-                       SELECT song_id FROM song_artists WHERE artist_id = $1))
-               AND ($2::bigint IS NULL OR s.id IN (
-                       SELECT song_id FROM song_albums WHERE album_id = $2))",
-        )
-        .bind(scope.artist)
-        .bind(scope.album),
-        "album" => sqlx::query(
+                              WHERE sal.song_id = s.id), '') AS album";
+    let query = match (item_type, scope.artist, scope.album) {
+        ("song", artist, Some(album)) => sqlx::query(sqlx::AssertSqlSafe(format!(
+            "{song_select}
+             FROM song_albums sa JOIN songs s ON s.id = sa.song_id
+             WHERE sa.album_id = $1
+               AND ($2::bigint IS NULL OR EXISTS (
+                       SELECT 1 FROM song_artists sar
+                       WHERE sar.song_id = s.id AND sar.artist_id = $2))"
+        )))
+        .bind(album)
+        .bind(artist),
+        ("song", Some(artist), None) => sqlx::query(sqlx::AssertSqlSafe(format!(
+            "{song_select}
+             FROM song_artists sa JOIN songs s ON s.id = sa.song_id
+             WHERE sa.artist_id = $1"
+        )))
+        .bind(artist),
+        ("album", Some(artist), _) => sqlx::query(
             "SELECT al.id, al.name, COALESCE(al.popularity, 0)::float8 AS popularity,
                     ''::text AS album
-             FROM albums al
-             WHERE al.id IN (SELECT album_id FROM artist_albums WHERE artist_id = $1)",
+             FROM artist_albums aa JOIN albums al ON al.id = aa.album_id
+             WHERE aa.artist_id = $1",
         )
-        .bind(scope.artist),
+        .bind(artist),
         _ => return Ok(Vec::new()),
     };
     let rows = query.persistent(false).fetch_all(pool).await?;
