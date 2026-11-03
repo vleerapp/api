@@ -2,6 +2,8 @@ use sqlx::{PgPool, Row};
 
 use crate::models::metadata::{Album, Artist, Song};
 
+const MAX_SONGS_PER_ISRC: i64 = 5;
+
 fn parse_ids(ids: &[String]) -> Vec<i64> {
     ids.iter().filter_map(|id| id.parse().ok()).collect()
 }
@@ -11,10 +13,18 @@ pub async fn song_ids_by_isrc(pool: &PgPool, isrcs: &[String]) -> Result<Vec<Str
         return Ok(Vec::new());
     }
     let upper: Vec<String> = isrcs.iter().map(|s| s.to_uppercase()).collect();
-    let rows = sqlx::query("SELECT id FROM songs WHERE isrc = ANY($1) ORDER BY id")
-        .bind(&upper)
-        .fetch_all(pool)
-        .await?;
+    let rows = sqlx::query(
+        "SELECT id FROM (
+             SELECT id, row_number() OVER (PARTITION BY isrc ORDER BY popularity DESC, id) AS rank
+             FROM songs WHERE isrc = ANY($1)
+         ) ranked
+         WHERE rank <= $2
+         ORDER BY id",
+    )
+    .bind(&upper)
+    .bind(MAX_SONGS_PER_ISRC)
+    .fetch_all(pool)
+    .await?;
     Ok(rows
         .into_iter()
         .map(|r| r.get::<i64, _>("id").to_string())
