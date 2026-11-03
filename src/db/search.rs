@@ -38,6 +38,61 @@ pub async fn candidates(
         .collect())
 }
 
+#[derive(Default, Clone, Copy)]
+pub struct Scope {
+    pub artist: Option<i64>,
+    pub album: Option<i64>,
+}
+
+impl Scope {
+    pub fn is_empty(&self) -> bool {
+        self.artist.is_none() && self.album.is_none()
+    }
+}
+
+pub async fn scoped_candidates(
+    pool: &PgPool,
+    item_type: &str,
+    scope: Scope,
+) -> Result<Vec<Candidate>, sqlx::Error> {
+    let query = match item_type {
+        "song" => sqlx::query(
+            "SELECT s.id, s.name, COALESCE(s.popularity, 0)::float8 AS popularity,
+                    COALESCE((SELECT string_agg(al.name, ', ' ORDER BY al.name)
+                              FROM song_albums sal JOIN albums al ON al.id = sal.album_id
+                              WHERE sal.song_id = s.id), '') AS album
+             FROM songs s
+             WHERE ($1::bigint IS NULL OR s.id IN (
+                       SELECT song_id FROM song_artists WHERE artist_id = $1))
+               AND ($2::bigint IS NULL OR s.id IN (
+                       SELECT song_id FROM song_albums WHERE album_id = $2))",
+        )
+        .bind(scope.artist)
+        .bind(scope.album),
+        "album" => sqlx::query(
+            "SELECT al.id, al.name, COALESCE(al.popularity, 0)::float8 AS popularity,
+                    ''::text AS album
+             FROM albums al
+             WHERE al.id IN (SELECT album_id FROM artist_albums WHERE artist_id = $1)",
+        )
+        .bind(scope.artist),
+        _ => return Ok(Vec::new()),
+    };
+    let rows = query.persistent(false).fetch_all(pool).await?;
+    Ok(rows
+        .into_iter()
+        .map(|r| Candidate {
+            id: r.get::<i64, _>("id").to_string(),
+            name: r.get("name"),
+            artist: String::new(),
+            album: r.get("album"),
+            popularity_score: r.get("popularity"),
+            duration: None,
+            album_tier: 0,
+        })
+        .collect())
+}
+
 pub async fn enrich(pool: &PgPool, found: &mut [Candidate]) -> Result<(), sqlx::Error> {
     if found.is_empty() {
         return Ok(());

@@ -35,6 +35,8 @@ pub struct IdentifyQuery {
     pub name: Option<String>,
     pub album: Option<String>,
     pub artist: Option<String>,
+    pub artist_id: Option<String>,
+    pub album_id: Option<String>,
     pub duration: Option<i32>,
 }
 
@@ -43,6 +45,8 @@ pub struct SearchQuery {
     pub name: Option<String>,
     pub album: Option<String>,
     pub artist: Option<String>,
+    pub artist_id: Option<String>,
+    pub album_id: Option<String>,
     pub duration: Option<i32>,
     pub limit: Option<i64>,
 }
@@ -291,29 +295,73 @@ fn match_inputs<'a>(
     })
 }
 
+type ScopeParams<'a> = [(&'static str, &'a Option<String>); 2];
+
+fn parse_scope(
+    item_type: &str,
+    params: ScopeParams<'_>,
+) -> Result<db::search::Scope, (StatusCode, Json<Value>)> {
+    let mut scope = db::search::Scope::default();
+    for (kind, raw) in params {
+        let Some(raw) = raw.as_deref().filter(|s| !s.is_empty()) else {
+            continue;
+        };
+        let id = match parse_id(raw) {
+            Some((k, id)) if k == kind => id.parse::<i64>().ok(),
+            _ => None,
+        };
+        let Some(id) = id else {
+            return Err(error_response(
+                StatusCode::BAD_REQUEST,
+                &format!("Invalid {kind}_id. Expected omm:{kind}:ID"),
+            ));
+        };
+        match (kind, item_type) {
+            ("artist", "song" | "album") => scope.artist = Some(id),
+            ("album", "song") => scope.album = Some(id),
+            _ => {}
+        }
+    }
+    Ok(scope)
+}
+
+fn scoring_inputs<'a>(inputs: MatchInputs<'a>, scope: &db::search::Scope) -> MatchInputs<'a> {
+    let (name, artist, album) = inputs;
+    (
+        name,
+        artist.filter(|_| scope.artist.is_none()),
+        album.filter(|_| scope.album.is_none()),
+    )
+}
+
 async fn find_candidates(
     state: &SearchState,
     item_type: &str,
     (name, artist, album): MatchInputs<'_>,
+    scope: db::search::Scope,
     keep: usize,
 ) -> Result<Vec<db::search::Candidate>, Option<StatusCode>> {
-    let Some(index) = state.index.as_ref() else {
-        tracing::error!("search unavailable: index is not loaded");
-        return Err(Some(StatusCode::SERVICE_UNAVAILABLE));
-    };
-    let mut candidates =
-        match db::search::candidates(index, item_type, name, artist, MATCH_CANDIDATES).await {
-            Ok(result) => result,
-            Err(e) => {
-                let status = classify_db_error(&e);
-                if status.is_some() {
-                    tracing::error!("match error: {}", e);
-                } else {
-                    tracing::warn!("match query error, treating as no match: {}", e);
-                }
-                return Err(status);
-            }
+    let fetched = if !scope.is_empty() {
+        db::search::scoped_candidates(&state.scrape_pool, item_type, scope).await
+    } else {
+        let Some(index) = state.index.as_ref() else {
+            tracing::error!("search unavailable: index is not loaded");
+            return Err(Some(StatusCode::SERVICE_UNAVAILABLE));
         };
+        db::search::candidates(index, item_type, name, artist, MATCH_CANDIDATES).await
+    };
+    let mut candidates = match fetched {
+        Ok(result) => result,
+        Err(e) => {
+            let status = classify_db_error(&e);
+            if status.is_some() {
+                tracing::error!("match error: {}", e);
+            } else {
+                tracing::warn!("match query error, treating as no match: {}", e);
+            }
+            return Err(status);
+        }
+    };
 
     if item_type == "song" {
         candidates = search::shortlist(candidates, name, artist, album, keep);
@@ -340,15 +388,24 @@ async fn identify_handler(
         Ok(inputs) => inputs,
         Err(e) => return e.into_response(),
     };
+    let scope = match parse_scope(
+        &item_type,
+        [("artist", &params.artist_id), ("album", &params.album_id)],
+    ) {
+        Ok(scope) => scope,
+        Err(e) => return e.into_response(),
+    };
+    let inputs = scoring_inputs(inputs, &scope);
     let (name, artist, album) = inputs;
 
-    let candidates = match find_candidates(&state, &item_type, inputs, ENRICH_CANDIDATES).await {
-        Ok(candidates) => candidates,
-        Err(None) => {
-            return error_response(StatusCode::NOT_FOUND, "No match found").into_response();
-        }
-        Err(Some(status)) => return error_response(status, "Match failed").into_response(),
-    };
+    let candidates =
+        match find_candidates(&state, &item_type, inputs, scope, ENRICH_CANDIDATES).await {
+            Ok(candidates) => candidates,
+            Err(None) => {
+                return error_response(StatusCode::NOT_FOUND, "No match found").into_response();
+            }
+            Err(Some(status)) => return error_response(status, "Match failed").into_response(),
+        };
 
     let Some(matched) = search::best_match(
         &candidates,
@@ -381,6 +438,14 @@ async fn search_handler(
         Ok(inputs) => inputs,
         Err(e) => return e.into_response(),
     };
+    let scope = match parse_scope(
+        &item_type,
+        [("artist", &params.artist_id), ("album", &params.album_id)],
+    ) {
+        Ok(scope) => scope,
+        Err(e) => return e.into_response(),
+    };
+    let inputs = scoring_inputs(inputs, &scope);
     let (name, artist, album) = inputs;
     let limit = params.limit.unwrap_or(DEFAULT_SEARCH_LIMIT);
     if !(1..=MAX_SEARCH_LIMIT).contains(&limit) {
@@ -392,6 +457,7 @@ async fn search_handler(
         &state,
         &item_type,
         inputs,
+        scope,
         ENRICH_CANDIDATES.max(limit as usize),
     )
     .await
