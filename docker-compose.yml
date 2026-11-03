@@ -12,7 +12,7 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
-      - ./index:/app/index:ro
+      - ./index:/app/index
     depends_on:
       postgres:
         condition: service_healthy
