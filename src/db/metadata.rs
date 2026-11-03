@@ -41,105 +41,7 @@ pub async fn get_songs_by_ids(pool: &PgPool, ids: &[String]) -> Result<Vec<Song>
         return Ok(Vec::new());
     }
     let rows = sqlx::query(
-        r#"WITH song_genres_agg AS (
-                SELECT
-                    sg.song_id,
-                    array_agg(g.name ORDER BY g.name) AS genres
-                FROM song_genres sg
-                JOIN genres g ON sg.genre_id = g.id
-                WHERE sg.song_id = ANY($1)
-                GROUP BY sg.song_id
-            ),
-            artist_genres_agg AS (
-                SELECT
-                    ag.artist_id,
-                    array_agg(g.name ORDER BY g.name) AS genres
-                FROM artist_genres ag
-                JOIN genres g ON ag.genre_id = g.id
-                WHERE ag.artist_id IN (
-                    SELECT sa.artist_id FROM song_artists sa WHERE sa.song_id = ANY($1)
-                )
-                GROUP BY ag.artist_id
-            ),
-            artist_agg AS (
-                SELECT
-                    sa.song_id,
-                    json_agg(json_build_object(
-                        'id', a.id::text,
-                        'name', a.name,
-                        'image', COALESCE(artwork_url(a.image), ''),
-                        'genres', COALESCE(to_json(aga.genres), '[]'::json)
-                    ) ORDER BY a.name) AS artists_json
-                FROM song_artists sa
-                JOIN artists a ON sa.artist_id = a.id
-                LEFT JOIN artist_genres_agg aga ON aga.artist_id = a.id
-                WHERE sa.song_id = ANY($1)
-                GROUP BY sa.song_id
-            ),
-            album_artist_genres_agg AS (
-                SELECT
-                    ag.artist_id,
-                    array_agg(g.name ORDER BY g.name) AS genres
-                FROM artist_genres ag
-                JOIN genres g ON ag.genre_id = g.id
-                WHERE ag.artist_id IN (
-                    SELECT aa.artist_id FROM artist_albums aa
-                    WHERE aa.album_id IN (
-                        SELECT sal.album_id FROM song_albums sal WHERE sal.song_id = ANY($1)
-                    )
-                )
-                GROUP BY ag.artist_id
-            ),
-            album_artists_agg AS (
-                SELECT
-                    aa.album_id,
-                    json_agg(json_build_object(
-                        'id', a.id::text,
-                        'name', a.name,
-                        'image', COALESCE(artwork_url(a.image), ''),
-                        'genres', COALESCE(to_json(aaga.genres), '[]'::json)
-                    ) ORDER BY a.name) AS artists_json
-                FROM artist_albums aa
-                JOIN artists a ON aa.artist_id = a.id
-                LEFT JOIN album_artist_genres_agg aaga ON aaga.artist_id = a.id
-                WHERE aa.album_id IN (
-                    SELECT sal.album_id FROM song_albums sal WHERE sal.song_id = ANY($1)
-                )
-                GROUP BY aa.album_id
-            ),
-            album_genres_agg AS (
-                SELECT
-                    ag.album_id,
-                    array_agg(g.name ORDER BY g.name) AS genres
-                FROM album_genres ag
-                JOIN genres g ON ag.genre_id = g.id
-                WHERE ag.album_id IN (
-                    SELECT sal.album_id FROM song_albums sal WHERE sal.song_id = ANY($1)
-                )
-                GROUP BY ag.album_id
-            ),
-            album_agg AS (
-                SELECT
-                    sal.song_id,
-                    json_agg(json_build_object(
-                        'id', al.id::text,
-                        'name', al.name,
-                        'artist', COALESCE(ala.artists_json, '[]'::json),
-                        'genres', COALESCE(to_json(alga.genres), '[]'::json),
-                        'image', COALESCE(artwork_url(al.image), ''),
-                        'date', COALESCE(to_char(al.date, 'YYYY-MM-DD'), ''),
-                        'track_count', al.track_count,
-                        'upc', al.upc,
-                        'label', al.label
-                    ) ORDER BY al.name) AS albums_json
-                FROM song_albums sal
-                JOIN albums al ON sal.album_id = al.id
-                LEFT JOIN album_artists_agg ala ON ala.album_id = al.id
-                LEFT JOIN album_genres_agg alga ON alga.album_id = al.id
-                WHERE sal.song_id = ANY($1)
-                GROUP BY sal.song_id
-            )
-           SELECT s.id, s.name,
+        r#"SELECT s.id, s.name,
                   COALESCE(artwork_url(s.image), artwork_url((
                       SELECT al.image FROM song_albums sal JOIN albums al ON al.id = sal.album_id
                       WHERE sal.song_id = s.id AND al.image IS NOT NULL
@@ -147,13 +49,58 @@ pub async fn get_songs_by_ids(pool: &PgPool, ids: &[String]) -> Result<Vec<Song>
                   )), '') AS image,
                   s.duration, s.disc_number, s.track_number, s.isrc,
                   COALESCE(to_char(s.date, 'YYYY-MM-DD'), '') AS date,
-                  artist_agg.artists_json,
-                  album_agg.albums_json,
-                  COALESCE(song_genres_agg.genres, '{}') AS genres
+                  (
+                      SELECT json_agg(json_build_object(
+                          'id', a.id::text,
+                          'name', a.name,
+                          'image', COALESCE(artwork_url(a.image), ''),
+                          'genres', COALESCE((
+                              SELECT to_json(array_agg(g.name ORDER BY g.name))
+                              FROM artist_genres ag JOIN genres g ON g.id = ag.genre_id
+                              WHERE ag.artist_id = a.id
+                          ), '[]'::json)
+                      ) ORDER BY a.name)
+                      FROM song_artists sa JOIN artists a ON a.id = sa.artist_id
+                      WHERE sa.song_id = s.id
+                  ) AS artists_json,
+                  (
+                      SELECT json_agg(json_build_object(
+                          'id', al.id::text,
+                          'name', al.name,
+                          'artist', COALESCE((
+                              SELECT json_agg(json_build_object(
+                                  'id', a.id::text,
+                                  'name', a.name,
+                                  'image', COALESCE(artwork_url(a.image), ''),
+                                  'genres', COALESCE((
+                                      SELECT to_json(array_agg(g.name ORDER BY g.name))
+                                      FROM artist_genres ag JOIN genres g ON g.id = ag.genre_id
+                                      WHERE ag.artist_id = a.id
+                                  ), '[]'::json)
+                              ) ORDER BY a.name)
+                              FROM artist_albums aa JOIN artists a ON a.id = aa.artist_id
+                              WHERE aa.album_id = al.id
+                          ), '[]'::json),
+                          'genres', COALESCE((
+                              SELECT to_json(array_agg(g.name ORDER BY g.name))
+                              FROM album_genres ag JOIN genres g ON g.id = ag.genre_id
+                              WHERE ag.album_id = al.id
+                          ), '[]'::json),
+                          'image', COALESCE(artwork_url(al.image), ''),
+                          'date', COALESCE(to_char(al.date, 'YYYY-MM-DD'), ''),
+                          'track_count', al.track_count,
+                          'upc', al.upc,
+                          'label', al.label
+                      ) ORDER BY al.name)
+                      FROM song_albums sal JOIN albums al ON al.id = sal.album_id
+                      WHERE sal.song_id = s.id
+                  ) AS albums_json,
+                  COALESCE((
+                      SELECT array_agg(g.name ORDER BY g.name)
+                      FROM song_genres sg JOIN genres g ON g.id = sg.genre_id
+                      WHERE sg.song_id = s.id
+                  ), '{}') AS genres
            FROM songs s
-           LEFT JOIN artist_agg ON artist_agg.song_id = s.id
-           LEFT JOIN album_agg ON album_agg.song_id = s.id
-           LEFT JOIN song_genres_agg ON song_genres_agg.song_id = s.id
            WHERE s.id = ANY($1)
         "#,
     )
