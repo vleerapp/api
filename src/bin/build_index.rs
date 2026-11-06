@@ -10,11 +10,13 @@ use std::collections::HashMap;
 use std::fs;
 use std::future::Future;
 use std::path::PathBuf;
+use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tantivy::schema::Field;
 use tantivy::{Index, IndexWriter, TantivyDocument};
+use tokio::io::AsyncReadExt;
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -62,6 +64,81 @@ struct Args {
 
     #[arg(long, default_value_t = 2048)]
     heap_mb: usize,
+
+    #[arg(long, requires = "ship_dir")]
+    ship_host: Option<String>,
+
+    #[arg(long, requires = "ship_host")]
+    ship_dir: Option<String>,
+
+    #[arg(long, requires = "ship_host")]
+    ship_only: bool,
+}
+
+type Ship = tokio::task::JoinHandle<Result<()>>;
+
+fn ship(args: &Args, table: &'static str) -> Option<Ship> {
+    let (host, dir) = (args.ship_host.clone()?, args.ship_dir.clone()?);
+    Some(tokio::spawn(async move {
+        let mut child = tokio::process::Command::new("rsync")
+            .args(["-ahW", "--info=progress2", "--include"])
+            .arg(format!("{table}/***"))
+            .arg("--include")
+            .arg(format!("{table}.*.fst"))
+            .args(["--exclude", "*"])
+            .arg(format!("{OUT_DIR}/"))
+            .arg(format!("{host}:{dir}/index.new/"))
+            .stdout(Stdio::piped())
+            .spawn()?;
+        let mut out = child.stdout.take().context("rsync stdout")?;
+        let mut buf = [0u8; 4096];
+        let mut line = Vec::new();
+        let mut last = Instant::now();
+        loop {
+            let n = out.read(&mut buf).await?;
+            if n == 0 {
+                break;
+            }
+            for &b in &buf[..n] {
+                if b != b'\r' && b != b'\n' {
+                    line.push(b);
+                    continue;
+                }
+                if !line.is_empty() && last.elapsed() >= Duration::from_secs(2) {
+                    info!("{table}: {}", String::from_utf8_lossy(&line).trim());
+                    last = Instant::now();
+                }
+                line.clear();
+            }
+        }
+        let status = child.wait().await?;
+        if !status.success() {
+            bail!("rsync {table} failed: {status}");
+        }
+        info!("{table}: shipped");
+        Ok(())
+    }))
+}
+
+async fn finish_ship(args: &Args, ships: Vec<Ship>) -> Result<()> {
+    let (Some(host), Some(dir)) = (&args.ship_host, &args.ship_dir) else {
+        return Ok(());
+    };
+    for s in ships {
+        s.await??;
+    }
+    let status = tokio::process::Command::new("ssh")
+        .arg(host)
+        .arg(format!(
+            "cd '{dir}' && rm -rf index.old && {{ [ ! -e index ] || mv index index.old; }} && mv index.new index"
+        ))
+        .status()
+        .await?;
+    if !status.success() {
+        bail!("remote swap failed: {status}");
+    }
+    info!("remote index swapped in");
+    Ok(())
 }
 
 struct Names {
@@ -92,6 +169,13 @@ async fn main() -> Result<()> {
         .with(tracing_subscriber::fmt::layer())
         .init();
     let args = Args::parse();
+    if args.ship_only {
+        let ships = ["artists", "albums", "songs"]
+            .into_iter()
+            .filter_map(|t| ship(&args, t))
+            .collect();
+        return finish_ship(&args, ships).await;
+    }
     let opts = args
         .db_url
         .parse::<PgConnectOptions>()
@@ -104,11 +188,16 @@ async fn main() -> Result<()> {
         .context("connect to scrape database")?;
     fs::create_dir_all(OUT_DIR)?;
 
+    let mut ships = Vec::new();
     build(&pool, &args, &ARTIST, None, None).await?;
+    ships.extend(ship(&args, "artists"));
     let artists = Arc::new(load_names(&pool, &args, "artists").await?);
     build(&pool, &args, &ALBUM, Some(artists.clone()), None).await?;
+    ships.extend(ship(&args, "albums"));
     let albums = Arc::new(load_names(&pool, &args, "albums").await?);
     build(&pool, &args, &SONG, Some(artists), Some(albums)).await?;
+    ships.extend(ship(&args, "songs"));
+    finish_ship(&args, ships).await?;
     Ok(())
 }
 
