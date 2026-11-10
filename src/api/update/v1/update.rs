@@ -36,7 +36,7 @@ fn is_semver_prerelease(v: &str) -> bool {
 }
 
 const REPO: &str = "vleerapp/vleer";
-const S3_BASE: &str = "https://vleer-releases.objects.eplg.cloud";
+const S3_BASE: &str = "https://cdn.vleer.app";
 const RELEASE_PREFIX: &str = "release";
 const NIGHTLY_PREFIX: &str = "nightly";
 const NIGHTLY_NOTES_URL: &str = "https://github.com/vleerapp/vleer/actions/workflows/nightly.yml";

@@ -19,7 +19,7 @@ static SEMVER_PRERELEASE_RE: OnceLock<Regex> = OnceLock::new();
 static CONTENTS_RE: OnceLock<Regex> = OnceLock::new();
 static KEY_RE: OnceLock<Regex> = OnceLock::new();
 
-const S3_BASE: &str = "https://vleer-releases.objects.eplg.cloud";
+const S3_BASE: &str = "https://cdn.vleer.app";
 const RELEASE_PREFIX: &str = "release";
 const NIGHTLY_PREFIX: &str = "nightly";
 const OSES: [(&str, &str); 3] = [("macos", "dmg"), ("windows", "msi"), ("linux", "AppImage")];
