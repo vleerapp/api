@@ -37,6 +37,7 @@ struct Asset {
 }
 
 struct ReleaseEntry {
+    newest: String,
     assets: Vec<Asset>,
 }
 
@@ -45,6 +46,7 @@ struct ReleaseQuery {
     os: String,
     arch: String,
     nightly: Option<bool>,
+    version: Option<String>,
 }
 
 #[derive(Clone)]
@@ -145,15 +147,31 @@ async fn download_handler(
     };
 
     let nightly = query.nightly.unwrap_or(false);
+    if let Some(version) = query.version.as_deref() {
+        let valid = version.len() <= MAX_VERSION_LEN
+            && if nightly {
+                is_semver_prerelease(version)
+            } else {
+                is_semver(version)
+            };
+        if !valid {
+            return error_response(StatusCode::BAD_REQUEST, "Invalid version");
+        }
+    }
     let entry = match latest_release(&state, nightly).await {
         Ok(entry) => entry,
         Err(message) => return error_response(StatusCode::BAD_GATEWAY, &message),
     };
 
-    let Some(asset) = entry.assets.iter().find(|a| a.os == os && a.arch == arch) else {
+    let version = query.version.as_deref().unwrap_or(&entry.newest);
+    let Some(asset) = entry
+        .assets
+        .iter()
+        .find(|a| a.version == version && a.os == os && a.arch == arch)
+    else {
         return error_response(
             StatusCode::NOT_FOUND,
-            "No release asset for this os and arch",
+            "No release asset for this version, os and arch",
         );
     };
 
@@ -324,7 +342,5 @@ fn entry_from_listing(xml: &str, prefix: &str, nightly: bool) -> Option<ReleaseE
         .map(|a| a.version.clone())
         .max_by_key(|v| version_rank(v))?;
 
-    assets.retain(|a| a.version == newest);
-
-    Some(ReleaseEntry { assets })
+    Some(ReleaseEntry { newest, assets })
 }
