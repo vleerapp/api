@@ -11,6 +11,7 @@ const ALBUM_WEIGHT: f64 = 0.1;
 const POPULARITY_WEIGHT: f64 = 0.15;
 const DURATION_WEIGHT: f64 = 0.3;
 const ALBUM_TIER_PENALTY: f64 = 0.05;
+const ARTIST_MIN: f64 = 0.3;
 pub const DURATION_TOLERANCE_MS: i32 = 50;
 
 struct Field {
@@ -112,6 +113,15 @@ impl Scorer {
         }
     }
 
+    fn artist_ok(&mut self, c: &Candidate) -> bool {
+        match &self.artist {
+            Some(f) if !c.artist.is_empty() => {
+                f.score(&c.artist, false, &mut self.matcher, &mut self.buf) >= ARTIST_MIN
+            }
+            _ => true,
+        }
+    }
+
     fn base(&mut self, c: &Candidate) -> f64 {
         let mut score = self
             .name
@@ -159,7 +169,10 @@ fn scored<'a>(
 
     candidates
         .iter()
-        .map(|c| {
+        .filter_map(|c| {
+            if !scorer.artist_ok(c) {
+                return None;
+            }
             let mut score = scorer.base(c);
             score -= c.album_tier.clamp(0, 8) as f64 * ALBUM_TIER_PENALTY;
             if let (Some(want), Some(have)) = (duration, c.duration) {
@@ -169,7 +182,7 @@ fn scored<'a>(
                         * DURATION_WEIGHT;
                 }
             }
-            (c, score)
+            Some((c, score))
         })
         .collect()
 }
@@ -221,7 +234,7 @@ mod tests {
     fn rank_leads_with_best_match_including_ties() {
         let candidates = vec![
             candidate("1", "Song", "Artist"),
-            candidate("2", "Other", "Someone"),
+            candidate("2", "Other", "Artists"),
             candidate("3", "Song", "Artist"),
         ];
         let best = best_match(&candidates, "Song", Some("Artist"), None, None).unwrap();
@@ -229,6 +242,13 @@ mod tests {
         assert_eq!(ranked.len(), 3);
         assert!(std::ptr::eq(ranked[0], best));
         assert_eq!(ranked[2].id, "2");
+    }
+
+    #[test]
+    fn unrelated_artist_is_no_match() {
+        let candidates = vec![candidate("1", "Not That Deep", "Little Hurt")];
+        assert!(best_match(&candidates, "Not That Deep", Some("Venjent"), None, None).is_none());
+        assert!(rank(&candidates, "Not That Deep", Some("Venjent"), None, None, 5).is_empty());
     }
 
     #[test]
